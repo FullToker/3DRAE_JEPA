@@ -1,0 +1,55 @@
+model:
+  target: stage1.RAE_Latent
+  params:
+    encoder_cls: Dinov2withNorm
+    encoder_params:
+      dinov2_path: checkpoints/backbones/dinov2-with-registers-base
+      normalize: false
+    neck_cls: LatentFuseNeck
+    neck_params:
+      latent_token_num: 1024
+      hidden_size: 768
+      patch_size: 14
+      depth: 12
+      num_heads: 16
+      mlp_ratio: 4
+      rope_freq: 100
+      init_values: 0.01
+      normalize: true
+    pretrained_neck_path: outputs/stage1/neck.safetensors
+    noise_tau: 0.0
+
+dataset:
+  path: data/scannet
+  split: train
+  repeat: 1
+  patch_size: 14
+  max_token_per_gpu: 25000
+  max_batch_size: 32
+  min_aspect_ratio: 0.7
+  max_aspect_ratio: 1.8
+  min_pixel_count: 37000
+  max_pixel_count: 75500
+  min_sample_len: 1
+  max_sample_len: 1
+  min_interval: 1
+  max_interval: 1
+  fix_interval_prob: 0.0
+  mask_prob: 0.0
+  min_mask_ratio: 0.0
+  max_mask_ratio: 0.0
+  all_mask_prob: 0.0
+  novel_view_ratio: 0.0
+  aug_focal: 0.9
+  aug_crop: 16
+  aug_color_jitter_prob: 0.8
+  aug_color_jitter_brightness: 0.2
+  aug_color_jitter_contrast: 0.2
+  aug_color_jitter_saturation: 0.2
+  aug_color_jitter_hue: 0.02
+  aug_grayscale_prob: 0.0
+  aug_gaussian_blur_prob: 0.02
+
+statistics:
+  num_workers: 8
+  seed: 42

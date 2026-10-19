@@ -1,0 +1,105 @@
+autoencoder:
+  target: stage1.RAE_Latent
+  params:
+    encoder_cls: Dinov2withNorm
+    encoder_params:
+      dinov2_path: checkpoints/backbones/dinov2-with-registers-base
+      normalize: false
+    neck_cls: LatentFuseNeck
+    neck_params:
+      latent_token_num: 1024
+      hidden_size: 768
+      patch_size: 14
+      depth: 12
+      num_heads: 16
+      mlp_ratio: 4
+      rope_freq: 100
+      init_values: 0.01
+      normalize: true
+    pretrained_neck_path: outputs/stage1/neck.safetensors
+    decoder_img_cls: LatentImageDecoder
+    decoder_img_params:
+      hidden_size_input: 768
+      hidden_size: 768
+      patch_size: 14
+      depth: 16
+      num_heads: 16
+      mlp_ratio: 4
+      rope_freq: 100
+      init_values: 0.01
+    pretrained_decoder_img_path: outputs/stage1/decoder.safetensors
+    normalization_stat_path: outputs/stage1/stats.safetensors
+    noise_tau: 0.0
+
+model:
+  target: stage2.models.DiTwDDTHead
+  params:
+    latent_size: 1024
+    in_channels: 768
+    hidden_size: [1152, 2048]
+    depth: [28, 2]
+    num_heads: [16, 16]
+    mlp_ratio: 4.0
+    num_classes: 1000
+
+transport:
+  time_dist_type: logit-normal_0_1
+
+latent_shape: [1024, 768]
+time_distribution_shift_dim: 786432
+time_distribution_shift_base: 4096
+
+dataset:
+  path: data/scannet
+  split: train
+  repeat: 20
+  patch_size: 14
+  max_token_per_gpu: 75000
+  max_batch_size: 24
+  min_aspect_ratio: 0.7
+  max_aspect_ratio: 1.8
+  min_pixel_count: 37000
+  max_pixel_count: 75500
+  min_sample_len: 6
+  max_sample_len: 18
+  min_interval: 6
+  max_interval: 10
+  fix_interval_prob: 0.0
+  mask_prob: 1.0
+  min_mask_ratio: 0.6
+  max_mask_ratio: 0.9
+  all_mask_prob: 0.1
+  novel_view_ratio: 0.0
+  aug_focal: 0.9
+  aug_crop: 16
+  aug_color_jitter_prob: 0.8
+  aug_color_jitter_brightness: 0.2
+  aug_color_jitter_contrast: 0.2
+  aug_color_jitter_saturation: 0.2
+  aug_color_jitter_hue: 0.02
+  aug_grayscale_prob: 0.0
+  aug_gaussian_blur_prob: 0.02
+
+training:
+  max_steps: 160000
+  gradient_accumulation_steps: 1
+  checkpoint_interval: 1000
+  vis_interval: 400
+  vis_num_steps: 50
+  log_interval: 10
+  clip_gradient: 1.0
+  ema_decay: 0.9995
+  num_workers: 16
+  seed: 42
+  optimizer:
+    type: adamw
+    lr: 2.0e-4
+    betas: [0.9, 0.95]
+    weight_decay: 0.0
+  scheduler:
+    type: linear
+    warmup_steps: 8000
+    decay_end_steps: 140000
+    base_lr: 2.0e-4
+    final_lr: 2.0e-5
+    warmup_from_zero: false

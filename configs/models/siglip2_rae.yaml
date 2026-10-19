@@ -1,0 +1,30 @@
+target: stage1.RAE_Latent
+params:
+  encoder_cls: SigLIP2wNorm
+  encoder_params:
+    model_name: checkpoints/backbones/siglip2-base-patch16-256
+  neck_cls: LatentFuseNeck
+  neck_params:
+    latent_token_num: 1024
+    hidden_size: 768
+    patch_size: 14
+    depth: 12
+    num_heads: 16
+    mlp_ratio: 4
+    rope_freq: 100
+    init_values: 0.01
+    normalize: true
+  decoder_img_cls: LatentImageDecoder
+  decoder_img_params:
+    hidden_size_input: 768
+    hidden_size: 768
+    patch_size: 14
+    depth: 16
+    num_heads: 16
+    mlp_ratio: 4
+    rope_freq: 100
+    init_values: 0.01
+  pretrained_neck_path: checkpoints/siglip2/neck.safetensors
+  pretrained_decoder_img_path: checkpoints/siglip2/decoder.safetensors
+  normalization_stat_path: checkpoints/siglip2/stats.safetensors
+  noise_tau: 0.0

@@ -1,0 +1,20 @@
+target: stage1.RAE_Latent
+params:
+  encoder_cls: Dinov2withNorm
+  encoder_params:
+    dinov2_path: checkpoints/backbones/dinov2-with-registers-base
+    normalize: false
+  neck_cls: LatentFuseNeck
+  neck_params:
+    latent_token_num: 1024
+    hidden_size: 768
+    patch_size: 14
+    depth: 12
+    num_heads: 16
+    mlp_ratio: 4
+    rope_freq: 100
+    init_values: 0.01
+    normalize: true
+  pretrained_neck_path: checkpoints/dino2/neck.safetensors
+  normalization_stat_path: checkpoints/dino2/stats.safetensors
+  noise_tau: 0.0

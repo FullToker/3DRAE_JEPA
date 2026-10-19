@@ -1,0 +1,22 @@
+target: stage2.models.DiTwDDTHead
+params:
+  latent_size: 1024
+  in_channels: 768
+  hidden_size: [1152, 2048]
+  depth: [28, 2]
+  num_heads: [16, 16]
+  mlp_ratio: 4.0
+  num_classes: 1000
+
+weights: checkpoints/dino2/3ddit.safetensors
+
+inference:
+  latent_size: [1024, 768]
+  time_dist_shift_dim: 786432
+  time_dist_shift_base: 4096
+  transport:
+    time_dist_type: logit-normal_0_1
+  sampler:
+    num_steps: 50
+  guidance_scale: 2.0
+  cfg_interval: [0.0, 1.0]
