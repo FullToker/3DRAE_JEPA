@@ -1,0 +1,91 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Variant A: frozen 3DRAE (dino2, 1024 scene tokens) as VL-JEPA X-encoder
+# SFT on posed SPAR-7M (scannet + scannetpp), warm-started from open-vljepa
+# ──────────────────────────────────────────────────────────────────────────────
+#
+# Same predictor / y-encoder / InfoNCE / optimizer as
+# vjepa201/fusion_gv/configs/sft_from_vljepa_ckpt_fusiongv.yaml; only the
+# X-encoder differs. vis_proj (768 -> 2048) and the view-token modules start
+# at random init, predictor + y-encoder come from open-vljepa.
+#
+# Visual tokens per sample: 1024 scene latents + one token per view (2-3 here).
+# structured3d is excluded: its stored poses matched no tested camera
+# convention (jepa3d/tools/verify_spar_poses.py).
+#
+# Data (built by jepa3d/trainbatch/make_spar_manifests.sbatch):
+#   data/spar3d_train.jsonl  posed uni8 rows, images de-duplicated
+#   data/spar3d_val.jsonl    scene-disjoint held-out split of the same source
+#
+# Run: sbatch jepa3d/trainbatch/sft_3drae_spar.sbatch
+# ──────────────────────────────────────────────────────────────────────────────
+
+init_vljepa_ckpt: ${VJEPA_ROOT}/ckpts/open_vljepa/best.pt
+
+rae:
+  feature_config: configs/models/dino2_feature.yaml   # relative to this repo
+  max_views: 32
+
+fusion:
+  x_encoder_type: 3drae
+  x_encoder_output_dim: 768
+
+model:
+  query_model_name: meta-llama/Llama-3.2-1B
+  predictor_llama_layers: 8
+  max_query_tokens: 256
+  y_encoder_name: google/embeddinggemma-300m
+  max_target_tokens: 256
+  shared_embed_dim: 1536
+  y_encoder_lr_multiplier: 0.05
+  hf_cache_dir: ${VJEPA_ROOT}/ckpts
+
+data:
+  train_manifests:
+    - ${RAE_ROOT}/data/spar3d_train.jsonl
+  val_manifests:
+    - ${RAE_ROOT}/data/spar3d_val.jsonl
+  image_size: [224, 308]    # (H, W), multiple of 14, ScanNet aspect, as 3DRAE's ScanNet examples
+  num_workers: 6
+  val_num_workers: 2
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 2
+
+train:
+  seed: 42
+  device: cuda
+  precision: bf16
+  output_dir: ${RAE_ROOT}/outputs/sft_3drae_spar
+
+  batch_size: 32
+  gradient_accumulation_steps: 4
+  # effective batch = 32 * 4 * 3 GPUs = 384; set from the train manifest size
+  # for 3 epochs, see jepa3d/README.md
+  max_steps: 10841
+
+  clip_grad_norm: 1.0
+  log_every: 50
+  save_every: 2000
+  val_every: 1000
+  val_max_batches: 20
+  val_batch_size: 32
+
+  learning_rate: 1.0e-5
+  min_lr: 1.0e-6
+  weight_decay: 0.01
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-8
+  scheduler: cosine
+  temperature: 0.07
+
+mlflow:
+  enabled: true
+  env_file: ${VJEPA_ROOT}/.env/mlflow.env
+  tracking_uri: "file:///glob/g01-cache/pf/Yushuo/mlruns"
+  experiment_name: vljepa_sft_from_ckpt
+  run_name: sft_3drae_spar
+  log_params: true
+  tags:
+    project: vljepa-3drae
+    variant: A-3drae-dino2-1024

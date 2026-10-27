@@ -8,3 +8,6 @@ checkpoints/
 # Experiment records / outputs: server-side only
 logs/
 outputs/
+
+# Generated manifests (server-side)
+data/
