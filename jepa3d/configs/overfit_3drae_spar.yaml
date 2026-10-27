@@ -47,8 +47,10 @@ train:
 
   batch_size: 32
   gradient_accumulation_steps: 4
-  # effective batch = 32 * 4 * 3 GPUs = 384
-  # 3 epochs over data/spar3d_train.jsonl (1,385,510 rows): ceil(3 * 1385510 / 384)
+  # effective batch = 32 * 4 * 3 GPUs = 384. GVJEPATrainer counts max_steps in
+  # per-rank micro-batches: 10825 * 32 * 3 = 1.04M samples = 0.75 epoch of
+  # data/spar3d_train.jsonl (1,385,510 rows), the same epoch fraction as the
+  # fusion_gv baseline (13839 * 96 over 1,771,283 rows).
   max_steps: 10825
 
   clip_grad_norm: 1.0
