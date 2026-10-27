@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+
+# 3DRAE weights (downloaded per machine)
+checkpoints/
+
+# Experiment records / outputs: server-side only
+logs/
+outputs/
