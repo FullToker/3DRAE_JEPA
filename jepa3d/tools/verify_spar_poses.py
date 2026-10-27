@@ -48,11 +48,20 @@ AXES = {
 }
 
 
-def _reproject_error(a, b, invert, unit, axes="+++", stride=4):
+def _as_c2w(P, stored):
+    if stored == "w2c":
+        return np.linalg.inv(P)
+    if stored == "mixed":   # w2c rotation with camera-center translation
+        out = P.copy()
+        out[:3, :3] = P[:3, :3].T
+        return out
+    return P
+
+
+def _reproject_error(a, b, stored, unit, axes="+++", stride=4):
     Ka, Pa = load_camera(a)
     Kb, Pb = load_camera(b)
-    if invert:   # stored matrix is world-to-camera
-        Pa, Pb = np.linalg.inv(Pa), np.linalg.inv(Pb)
+    Pa, Pb = _as_c2w(Pa, stored), _as_c2w(Pb, stored)
     Pa, Pb = Pa @ AXES[axes], Pb @ AXES[axes]
     color_w, color_h = Image.open(a).size
     da = np.asarray(Image.open(depth_path(a)), dtype=np.float64) * unit
@@ -98,11 +107,11 @@ def main():
         print(f"== {subset}: color {cw}x{ch}, depth {dw}x{dh}, "
               f"cx/W={K[0, 2] / cw:.3f} cy/H={K[1, 2] / ch:.3f} fx={K[0, 0]:.1f}")
         results = []
-        for invert, unit, axes in itertools.product((False, True), DEPTH_UNITS, AXES):
-            errs = [_reproject_error(a, b, invert, unit, axes) for a, b in pairs]
+        for stored, unit, axes in itertools.product(("c2w", "w2c", "mixed"), DEPTH_UNITS, AXES):
+            errs = [_reproject_error(a, b, stored, unit, axes) for a, b in pairs]
             med = np.median([e for e, _ in errs])
             inl = np.mean([i for _, i in errs])
-            results.append((med, inl, "w2c" if invert else "c2w", axes, unit))
+            results.append((med, inl, stored, axes, unit))
         for med, inl, name, axes, unit in sorted(results)[: args.top]:
             print(f"   stored={name} axes={axes} depth_unit={unit:g}: "
                   f"median rel err={med:.3f} inlier<5%={inl:.2f}")
