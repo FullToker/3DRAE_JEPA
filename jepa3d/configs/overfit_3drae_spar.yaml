@@ -47,13 +47,13 @@ train:
 
   batch_size: 32
   gradient_accumulation_steps: 4
-  # effective batch = 32 * 4 * 3 GPUs = 384; set from the train manifest size
-  # for 3 epochs, see jepa3d/README.md
-  max_steps: 10841
+  # effective batch = 32 * 4 * 3 GPUs = 384
+  # 3 epochs over data/spar3d_train.jsonl (1,385,510 rows): ceil(3 * 1385510 / 384)
+  max_steps: 10825
 
   clip_grad_norm: 1.0
   log_every: 50
-  save_every: 2000
+  save_every: 5000   # ~10 GB per checkpoint, /glob is 96% full
   val_every: 1000
   val_max_batches: 20
   val_batch_size: 32
