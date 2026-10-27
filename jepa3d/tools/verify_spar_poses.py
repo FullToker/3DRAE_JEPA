@@ -40,11 +40,19 @@ def _pairs(manifest, per_subset):
     return found
 
 
-def _reproject_error(a, b, invert, unit, stride=4):
+# Camera-axis conventions applied on the camera side of c2w.
+AXES = {
+    "opencv": np.diag([1.0, 1.0, 1.0, 1.0]),
+    "opengl": np.diag([1.0, -1.0, -1.0, 1.0]),
+}
+
+
+def _reproject_error(a, b, invert, unit, axes="opencv", stride=4):
     Ka, Pa = load_camera(a)
     Kb, Pb = load_camera(b)
     if invert:   # stored matrix is world-to-camera
         Pa, Pb = np.linalg.inv(Pa), np.linalg.inv(Pb)
+    Pa, Pb = Pa @ AXES[axes], Pb @ AXES[axes]
     color_w, color_h = Image.open(a).size
     da = np.asarray(Image.open(depth_path(a)), dtype=np.float64) * unit
     db = np.asarray(Image.open(depth_path(b)), dtype=np.float64) * unit
@@ -87,12 +95,13 @@ def main():
         dh, dw = np.asarray(Image.open(depth_path(a0))).shape
         print(f"== {subset}: color {cw}x{ch}, depth {dw}x{dh}, "
               f"cx/W={K[0, 2] / cw:.3f} cy/H={K[1, 2] / ch:.3f} fx={K[0, 0]:.1f}")
-        for invert, unit in itertools.product((False, True), DEPTH_UNITS):
-            errs = [_reproject_error(a, b, invert, unit) for a, b in pairs]
+        for invert, unit, axes in itertools.product((False, True), DEPTH_UNITS, AXES):
+            errs = [_reproject_error(a, b, invert, unit, axes) for a, b in pairs]
             med = np.median([e for e, _ in errs])
             inl = np.mean([i for _, i in errs])
             name = "w2c" if invert else "c2w"
-            print(f"   stored={name} depth_unit={unit:g}: median rel err={med:.3f} inlier<5%={inl:.2f}")
+            print(f"   stored={name} axes={axes} depth_unit={unit:g}: "
+                  f"median rel err={med:.3f} inlier<5%={inl:.2f}")
 
 
 if __name__ == "__main__":
