@@ -22,7 +22,7 @@ from PIL import Image
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from jepa3d.spar_cameras import depth_path, load_camera
 
-DEPTH_UNITS = (1e-3, 1e-4, 1.0)
+DEPTH_UNITS = (1e-3, 1e-4, 1.0, 1e3)
 
 
 def _pairs(manifest, per_subset):
@@ -40,14 +40,15 @@ def _pairs(manifest, per_subset):
     return found
 
 
-# Camera-axis conventions applied on the camera side of c2w.
+# Camera-axis sign conventions applied on the camera side of c2w
+# ("+++" = OpenCV, "+--" = OpenGL).
 AXES = {
-    "opencv": np.diag([1.0, 1.0, 1.0, 1.0]),
-    "opengl": np.diag([1.0, -1.0, -1.0, 1.0]),
+    "".join("+" if v > 0 else "-" for v in signs): np.diag([*signs, 1.0])
+    for signs in itertools.product((1.0, -1.0), repeat=3)
 }
 
 
-def _reproject_error(a, b, invert, unit, axes="opencv", stride=4):
+def _reproject_error(a, b, invert, unit, axes="+++", stride=4):
     Ka, Pa = load_camera(a)
     Kb, Pb = load_camera(b)
     if invert:   # stored matrix is world-to-camera
@@ -86,6 +87,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifest", required=True)
     parser.add_argument("--pairs-per-subset", type=int, default=20)
+    parser.add_argument("--top", type=int, default=4, help="hypotheses printed per subset")
     args = parser.parse_args()
 
     for subset, pairs in sorted(_pairs(args.manifest, args.pairs_per_subset).items()):
@@ -95,11 +97,13 @@ def main():
         dh, dw = np.asarray(Image.open(depth_path(a0))).shape
         print(f"== {subset}: color {cw}x{ch}, depth {dw}x{dh}, "
               f"cx/W={K[0, 2] / cw:.3f} cy/H={K[1, 2] / ch:.3f} fx={K[0, 0]:.1f}")
+        results = []
         for invert, unit, axes in itertools.product((False, True), DEPTH_UNITS, AXES):
             errs = [_reproject_error(a, b, invert, unit, axes) for a, b in pairs]
             med = np.median([e for e, _ in errs])
             inl = np.mean([i for _, i in errs])
-            name = "w2c" if invert else "c2w"
+            results.append((med, inl, "w2c" if invert else "c2w", axes, unit))
+        for med, inl, name, axes, unit in sorted(results)[: args.top]:
             print(f"   stored={name} axes={axes} depth_unit={unit:g}: "
                   f"median rel err={med:.3f} inlier<5%={inl:.2f}")
 
