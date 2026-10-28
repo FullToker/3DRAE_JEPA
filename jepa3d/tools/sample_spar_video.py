@@ -46,9 +46,6 @@ TYPES = ("obj_count", "room_size", "appearance_order",
          "spatial_imagination_oc_video_hard", "spatial_imagination_oo_video_hard")
 OBJECT = re.compile(r"((?:[A-Za-z]+ ){0,3}[A-Za-z]+) \(Object(\d)\)")
 SPATIAL = re.compile(r"\b(left|right|above|below|front|behind|closer|farther)\b")
-COUNT_CATEGORY = re.compile(
-    r"how many (.+?) (?:can|could|would|are|is|do|does|occupy|occupies|exist|exists|appear|appears"
-    r"|might|will|have|has|there|in|inside|you)\b", re.I)
 EMPTY_SLOT = re.compile(r"[^\s.] {2,}\S")
 LEAD_WORDS = {"a", "an", "the", "to", "at", "on", "of", "in", "by", "from", "with", "and", "toward",
               "towards", "near", "facing", "face", "faces", "about", "does", "do", "is", "are", "where",
@@ -100,9 +97,8 @@ def convert(qtype, query_raw, answer_raw):
         names = "|".join(objs[k] for k in sorted(objs))
         return query, answer, f"{qtype}:{names}:{'|'.join(SPATIAL.findall(answer.lower()))}"
     if qtype == "appearance_order":
-        order = answer.rsplit(":", 1)[-1].strip().rstrip(".")
-        items = [x.strip().lower() for x in order.split(",")]
-        if len(items) < 2 or not all(items):
+        items = order_items(answer)
+        if len(items) < 2 or len(set(items)) < len(items) or not all(i in query.lower() for i in items):
             return "unparsed"
         return query, f"The order of first appearance is: {', '.join(items)}.", "order:" + "|".join(items)
     numbers = re.findall(r"\d+(?:\.\d+)?", answer)
@@ -110,9 +106,39 @@ def convert(qtype, query_raw, answer_raw):
         return "unparsed"
     if qtype == "room_size":
         return query, answer, f"area:{round(float(numbers[0]))}"
-    m = COUNT_CATEGORY.search(query)
-    key = f"count:{numbers[0]}:{m.group(1).lower()}" if m else answer.lower()
-    return query, answer, key
+    category = count_category(query, answer, numbers[0])
+    return query, answer, f"count:{numbers[0]}:{category}" if category else answer.lower()
+
+
+def order_items(answer: str) -> list:
+    """Final order from the last sentence: after its last ':' or else after its last ' is '/' are '.
+
+    Templates: "Sorted order: a, b, c, d." / "Thus, the order is: a, ..." /
+    "The correct order is a, b, c, d." / "Sorted, they are: a, ...".
+    """
+    last = re.split(r"(?<=\.)\s+", answer.strip())[-1].rstrip(".")
+    if ":" in last:
+        tail = last.rsplit(":", 1)[1]
+    else:
+        m = list(re.finditer(r"\b(?:is|are)\b", last))
+        if not m:
+            return []
+        tail = last[m[-1].end():]
+    return [x.strip().lower() for x in tail.split(",") if x.strip()]
+
+
+def count_category(query: str, answer: str, number: str) -> str:
+    """Object category of an obj_count row: the shared leading words of the question
+    after "how many" and the answer after the count ("trash can can be" / "trash can are")."""
+    q = re.search(r"how many (.+)", query, re.I)
+    a = re.search(rf"\b{re.escape(number)} (.+)", answer)
+    if not (q and a):
+        return ""
+    qw, aw = q.group(1).lower().split(), a.group(1).lower().split()
+    n = 0
+    while n < min(len(qw), len(aw)) and qw[n].strip("?.,") == aw[n].strip("?.,"):
+        n += 1
+    return " ".join(w.strip("?.,") for w in qw[:n])
 
 
 def _scene_rows(item):
