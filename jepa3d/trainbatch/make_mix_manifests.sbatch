@@ -41,11 +41,13 @@ echo "[vsi590k f$N] start $(date)"
 $SIF python3 jepa3d/tools/sample_vsi590k.py --num-views "$N" --stats $STATS \
     --output "data/vsi590k_sn_f${N}${SUFFIX}.jsonl" --limit "$LIMIT"
 
-for split in train val; do
-    echo "[spar $split f$N] start $(date)"
-    $SIF python3 jepa3d/tools/sample_spar_video.py --split "$split" --num-views "$N" --stats $STATS \
-        --output "data/spar_video_${split}_f${N}${SUFFIX}.jsonl" --limit "$LIMIT"
-done
+echo "[spar train f$N] start $(date)"
+$SIF python3 jepa3d/tools/sample_spar_video.py --split train --num-views "$N" --stats $STATS \
+    --output "data/spar_video_train_f${N}${SUFFIX}.jsonl" --limit "$LIMIT"
+# SPAR's scannetpp val files are byte copies of its train files -> val = scannet only
+echo "[spar val f$N] start $(date)"
+$SIF python3 jepa3d/tools/sample_spar_video.py --split val --subsets scannet --num-views "$N" --stats $STATS \
+    --output "data/spar_video_val_f${N}${SUFFIX}.jsonl" --limit "$LIMIT"
 
 echo "[mix f$N] start $(date)"
 $SIF python3 jepa3d/tools/mix_manifests.py \

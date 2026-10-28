@@ -55,9 +55,9 @@ Excluded:
 | obj_frame_locate | answer is a list of original frame indices, little spatial semantics |
 | all 1-3 image types | not multi-view |
 
-Splits: SPAR `train` for training; SPAR `val` filtered with the same rules and kept as-is.
-Caveat: SPAR's ScanNet++ train and val use the same 803 scenes (ScanNet's are disjoint),
-so SPAR val is not scene-held-out.
+Splits: SPAR `train` for training; SPAR `val` filtered with the same rules, ScanNet only.
+SPAR's ScanNet++ `val` jsonl files are byte-identical copies of its `train` files (same md5),
+so they are left out; the ScanNet val scenes (308) are disjoint from train.
 
 Leakage vs VSI-Bench: VSI-590K shares 0 scenes with VSI-Bench; SPAR train shares 1 ScanNet
 scene -> dropped. VSI-Bench ScanNet (88 scenes) and ScanNet++ (40 of 50 with SPAR poses)

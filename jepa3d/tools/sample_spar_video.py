@@ -169,6 +169,8 @@ def vsibench_scenes():
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--split", required=True, choices=["train", "val"])
+    parser.add_argument("--subsets", nargs="+", default=list(SUBSETS), choices=SUBSETS,
+                        help="SPAR's scannetpp val files are byte copies of train: use scannet only for val")
     parser.add_argument("--output", required=True)
     parser.add_argument("--stats", nargs="+", required=True)
     parser.add_argument("--num-views", type=int, default=8)
@@ -181,7 +183,7 @@ def main():
 
     banned = vsibench_scenes() if args.split == "train" else set()
     by_scene, counts = defaultdict(list), Counter()
-    for subset in SUBSETS:
+    for subset in args.subsets:
         for qtype in TYPES:
             for path in sorted((SOURCE / "spar" / subset / "qa_jsonl" / args.split / qtype / "sentence").glob("*.jsonl")):
                 with open(path) as f:
