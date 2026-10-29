@@ -25,12 +25,18 @@ no poses on the server, or single images.
   All are scene-level (no frame references), so any posed subset of the scene is valid input.
 - Query: drop `<image>`, "These are frames of a video.", and answer-format hints
   ("Answer with the option's letter...", "single word or phrase"). Keep the option list text.
-- Target:
-  - multiple choice: letter -> option text (`D` -> `back-left`), no letter prefix
-    (matches the SPAR train format, see `vjepa201/notebooks/eval_format_check.ipynb`).
+- Short answer (`target_short`):
+  - multiple choice: letter -> option text (`D` -> `back-left`), no letter prefix.
   - numeric: add the unit parsed from the question (meters / feet / square feet / degrees);
     counts stay bare numbers.
-  - keep the original answer as `answer_raw`.
+  - original answer kept as `answer_raw`.
+- Target (`target`): the answer as a sentence naming the question's objects
+  (`jepa3d/vsi_text.py`), e.g. "Standing at the laptop and facing the bed, the cushion is
+  to my right." Objects and roles are read from the question template (19-100 wordings
+  per type, all audited); 2-3 sentence wordings per type, picked by row hash. Rows whose
+  slots cannot be read keep the short answer (`target_style: short`, none at present).
+  `answer_key` = canonical (first-wording) sentence, so paraphrases share a key.
+- Training data only: evaluation uses the raw benchmark questions and candidates.
 - appearance_order needs temporal order: selected frames are re-sorted by raw frame id.
 
 ## 3. SPAR-7M filtering (strict)
