@@ -14,6 +14,7 @@
 # (it also builds the VSI-Bench manifests). Queue after the overfit job:
 #   sbatch --dependency=afterok:<overfit job> jepa3d/trainbatch/sft_3drae_mix.sbatch
 # Re-run eval only: RUN_TRAIN=0 sbatch jepa3d/trainbatch/sft_3drae_mix.sbatch
+# Other config: CONFIG=jepa3d/configs/<name>.yaml sbatch ... (outputs follow its train.output_dir)
 # Resume is not supported by the trainer; a rerun starts from scratch.
 
 set -euo pipefail
@@ -25,8 +26,8 @@ ROOT="/glob/g01-cache/pf/Yushuo/3DRAE_JEPA"
 VJEPA="/glob/g01-cache/pf/Yushuo/vjepa201"
 CONTAINER="/glob/g01-cache/pf/Yushuo/container/vjepa21v2.sif"
 LOG_DIR="$ROOT/logs/sft_3drae_mix"
-CONFIG="jepa3d/configs/sft_3drae_mix_f${N}.yaml"
-OUT="outputs/sft_3drae_mix_f${N}"
+CONFIG=${CONFIG:-jepa3d/configs/sft_3drae_mix_f${N}.yaml}
+OUT=$(sed -n 's|^ *output_dir: ${RAE_ROOT}/||p' "$CONFIG")
 
 cd "$ROOT"
 mkdir -p "$LOG_DIR"
@@ -54,10 +55,14 @@ if [ "$RUN_TRAIN" = "1" ]; then
     echo "[train] done $(date)"
 fi
 
-for split in test debiased; do
-    echo "[infer-vsibench-$split] start $(date)"
-    $SIF python3 jepa3d/infer_spar.py --config "$CONFIG" \
-        --input "data/vsibench_${split}_posed_f${N}.jsonl" --output-dir "$OUT/infer_vsibench_${split}" \
-        --checkpoint "$OUT/final.pt"   # default picks the last step_*.pt, not final.pt
+# every saved checkpoint, so the curve over epochs is visible
+for ckpt in "$OUT"/step_*.pt "$OUT/final.pt"; do
+    [ -f "$ckpt" ] || continue
+    tag=$(basename "$ckpt" .pt)
+    for split in test debiased; do
+        echo "[infer-vsibench-$split $tag] start $(date)"
+        $SIF python3 jepa3d/infer_spar.py --config "$CONFIG" --checkpoint "$ckpt" \
+            --input "data/vsibench_${split}_posed_f${N}.jsonl" --output-dir "$OUT/infer_vsibench_${split}_${tag}"
+    done
 done
 echo "[done] $(date)"
