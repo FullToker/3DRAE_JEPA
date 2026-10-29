@@ -57,6 +57,7 @@ fi
 for split in test debiased; do
     echo "[infer-vsibench-$split] start $(date)"
     $SIF python3 jepa3d/infer_spar.py --config "$CONFIG" \
-        --input "data/vsibench_${split}_posed_f${N}.jsonl" --output-dir "$OUT/infer_vsibench_${split}"
+        --input "data/vsibench_${split}_posed_f${N}.jsonl" --output-dir "$OUT/infer_vsibench_${split}" \
+        --checkpoint "$OUT/final.pt"   # default picks the last step_*.pt, not final.pt
 done
 echo "[done] $(date)"
