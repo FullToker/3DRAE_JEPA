@@ -133,3 +133,14 @@ through without `answer_key`.
    commit locally, pull on the server, run f8 via sbatch (CPU only).
 2. Sample notebook: SPAR train / val and VSI rows with their 8 frames, query, target,
    answer_key, camera positions; review before 16 / 24 frames and before training.
+
+## 8. Training and eval (f8)
+
+- Config `jepa3d/configs/sft_3drae_mix_f8.yaml`: variant A model, `data.mask_key: answer_key`
+  (equal-answer pairs masked in InfoNCE via `group_id`), 1 epoch of the f8 mix on 3 GPUs.
+- Eval manifest `jepa3d/tools/make_vsibench_manifest.py`: VSI-Bench `test.jsonl` and
+  `test_debiased.parquet`, MC rows of ScanNet / ScanNet++ only (ARKitScenes has no poses
+  here; numeric rows are not candidate-scored), raw question and options with the
+  "A. " prefix removed, views by the same filter + pose FPS as training.
+- Jobs: `overfit_3drae_mix.sbatch` (eval manifests + 1-GPU overfit), then
+  `sft_3drae_mix.sbatch` with `--dependency=afterok`.

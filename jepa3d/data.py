@@ -26,9 +26,15 @@ from utils.camera import resize_intrinsics
 
 
 class PosedSparDataset(GVJEPADataset):
-    def __init__(self, manifest_path, max_views: int | None = None):
+    """mask_key: row field passed on as "group_id". GVJEPATrainer masks
+    off-diagonal InfoNCE pairs with equal group_id, so "answer_key" keeps
+    same-answer rows from being each other's negatives (manifests from
+    jepa3d/tools/sample_*.py); "group_id" masks same-scene pairs instead."""
+
+    def __init__(self, manifest_path, max_views: int | None = None, mask_key: str = "group_id"):
         super().__init__(manifest_path, num_frames=None)
         self.max_views = max_views
+        self.mask_key = mask_key
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         row = self._read_row(idx)
@@ -39,7 +45,7 @@ class PosedSparDataset(GVJEPADataset):
             "c2w": row["c2w"][:n],
             "query": row.get("query", ""),
             "target": row["target"],
-            "group_id": row.get("group_id"),
+            "group_id": row.get(self.mask_key),
             "row": row,
         }
 
@@ -60,9 +66,9 @@ def load_views(sample, image_size):
     images, Ks = [], []
     for path, K in zip(sample["image_paths"], sample["intrinsics"]):
         with Image.open(path) as image:
-            image = image.convert("RGB")
-            source = (image.height, image.width)
-            image = image.resize((width, height), Image.BICUBIC)
+            source = (image.height, image.width)   # K refers to the stored resolution
+            image.draft("RGB", (width, height))     # JPEG DCT downscale, never below the target size
+            image = image.convert("RGB").resize((width, height), Image.BICUBIC)
         images.append(torch.from_numpy(np.asarray(image, dtype=np.float32) / 255.0).permute(2, 0, 1))
         Ks.append(resize_intrinsics(torch.tensor(K, dtype=torch.float64), source, image_size))
     w2c = normalize_cameras(torch.tensor(sample["c2w"], dtype=torch.float64))
@@ -93,7 +99,7 @@ def spar3d_collate(batch: List[Dict[str, Any]], image_size=(224, 308)) -> Dict[s
 
 def build_loader(manifests, cfg: dict, batch_size: int, train: bool = True, limit: int = 0) -> DataLoader:
     dcfg = cfg["data"]
-    datasets = [PosedSparDataset(p, dcfg.get("max_views")) for p in manifests]
+    datasets = [PosedSparDataset(p, dcfg.get("max_views"), dcfg.get("mask_key", "group_id")) for p in manifests]
     ds = datasets[0] if len(datasets) == 1 else ConcatDataset(datasets)
     if limit:
         ds = Subset(ds, range(min(limit, len(ds))))
