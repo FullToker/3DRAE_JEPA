@@ -1,0 +1,80 @@
+# Geometry probe: can object positions be read from frozen 3DRAE tokens?
+
+Status: code written, formal runs not done. Results go here once they exist.
+
+Blind check on the 5-epoch VL-JEPA run: VSI-Bench accuracy is the same with real,
+shuffled and zero visual tokens. That cannot separate "the tokens hold no object
+geometry" from "Llama / InfoNCE does not use it". This probe skips Llama and
+InfoNCE and asks only the first question. It is a diagnostic, not part of the
+final model.
+
+## Data
+
+- Train: EmbodiedScan train, 958 ScanNet scenes. Val: EmbodiedScan val, 243 scenes.
+- Views: 8 frames, 224x308, same quality filter and pose FPS as the VL-JEPA data,
+  restricted to frames listed in EmbodiedScan (about half of the posed pool),
+  since visibility is only known for those. Train draws a new FPS seed per sample;
+  val uses 3 fixed seeds per scene.
+- Objects: category occurs once in the scene and is not in
+  `labels.EXCLUDED` (structure and catch-all classes). Train: visible in at
+  least one selected frame. Val: reported for visible and for all objects.
+
+## Ground truth
+
+Box centres are in the axis-aligned frame, so in the first camera's frame:
+
+    p = inv(axis_align @ pose_0) @ center
+    Delta_AB = p_B - p_A
+
+Units are metres. Pairs closer than 0.1 m are not used. Gravity for metrics is the
+raw world z axis, expressed in the first camera's frame. Distances are between
+centres, so they are not VSI's closest-point distances.
+
+## Model and loss
+
+    category name -> embeddinggemma (frozen) -> Linear(512) -> query
+    8 views -> 3DRAE (frozen) -> scene + view tokens -> Linear(512) -> memory
+    query, memory -> 2 cross-attention layers (8 heads) -> MLP -> p_norm
+    p_hat = s * p_norm     # s = input pose normalization scale, metres
+
+Objects are queried independently and never see each other. The view tokens'
+pose / feature projections train with the probe.
+
+    L = SmoothL1(p_hat, p)
+      + mean[1 - cos(Delta_hat_AB, Delta_AB)]
+      + mean[SmoothL1(log(1 + |Delta_hat_AB|), log(1 + |Delta_AB|))]
+
+over all ordered pairs of a scene.
+
+## Runs
+
+| Stage | What | Gate |
+|---|---|---|
+| `labels` | build labels, project box centres onto frames | look at the sheets before training |
+| `overfit` | 8 train scenes, fixed views | position error must approach 0 |
+| `train` | real tokens | main result |
+| `train` with `TOKENS=shuffled` | tokens from another scene | category-prior baseline |
+
+Final evaluation of each run also repeats with shuffled tokens at eval time.
+Reported at the last epoch, never selected on val.
+
+    STAGE=labels  sbatch jepa3d/geo_probe/geo_probe.sbatch
+    STAGE=overfit sbatch jepa3d/geo_probe/geo_probe.sbatch
+    STAGE=train TOKENS=real     sbatch jepa3d/geo_probe/geo_probe.sbatch
+    STAGE=train TOKENS=shuffled sbatch jepa3d/geo_probe/geo_probe.sbatch
+
+## Metrics and decision
+
+On the val scenes, with scene-bootstrap 95% intervals: position error, centre
+distance error, horizontal azimuth error, 4-quadrant accuracy (chance 25%) and
+left / right / back accuracy, for "stand at A, face C, where is B".
+
+Fixed before running:
+
+| Result | Reading | Next |
+|---|---|---|
+| quadrant >= 50% and >= 15 points above shuffled | tokens carry usable position | add geometry supervision to Llama |
+| clearly above shuffled, below that bar | coarse information only | improve token use or the encoder first |
+| no clear gap to shuffled | position not readable | go back to 3DRAE, skip Llama supervision |
+
+The third row only counts if the overfit stage passed.
