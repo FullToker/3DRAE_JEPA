@@ -1,6 +1,12 @@
 # Geometry probe: can object positions be read from frozen 3DRAE tokens?
 
-Status: code written, formal runs not done. Results go here once they exist.
+Status: labels checked, overfit passed (job 12359), formal runs not done.
+
+- Labels: sampled projection sheets put centres on the named objects. "Visible" is
+  loose: only 30% of a frame's visible objects have their centre inside that frame.
+  Some category names are noisy (a "blackboard" on a desk panel in scene0264_01).
+- Overfit, 8 scenes, 1000 steps: visible objects reach 0.00 m position error and 100%
+  quadrant accuracy with real tokens, 3.6 m and 61% with tokens swapped at eval.
 
 Blind check on the 5-epoch VL-JEPA run: VSI-Bench accuracy is the same with real,
 shuffled and zero visual tokens. That cannot separate "the tokens hold no object
@@ -12,8 +18,8 @@ final model.
 
 - Train: EmbodiedScan train, 958 ScanNet scenes. Val: EmbodiedScan val, 243 scenes.
 - Views: 8 frames, 224x308, same quality filter and pose FPS as the VL-JEPA data,
-  restricted to frames listed in EmbodiedScan (about half of the posed pool),
-  since visibility is only known for those. Train draws a new FPS seed per sample;
+  restricted to frames listed in EmbodiedScan (about 160 per train scene, 143 per
+  val scene), since visibility is only known for those. Train draws a new FPS seed per sample;
   val uses 3 fixed seeds per scene.
 - Objects: category occurs once in the scene and is not in
   `labels.EXCLUDED` (structure and catch-all classes). Train: visible in at
