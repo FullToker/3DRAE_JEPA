@@ -1,6 +1,19 @@
 # Geometry probe: can object positions be read from frozen 3DRAE tokens?
 
-Status: labels checked, overfit passed (job 12359), formal runs not done.
+Status: done (jobs 12360 real, 12361 shuffled). Verdict: coarse information only,
+below the pass bar, so no Llama geometry supervision yet.
+
+| Val, 229 scenes, visible objects | real tokens | shuffled-trained |
+|---|---|---|
+| quadrant acc (chance 25%) | 45.6% [43.3, 48.9] | 33.3% [32.0, 34.5] |
+| left / right / back acc | 54.5% | 42.5% |
+| azimuth error, median | 42.8 deg | 65.7 deg |
+| position error, median | 0.95 m | 1.85 m |
+| pair distance error, median | 0.64 m | 1.08 m |
+
+Bar was quadrant >= 50% and >= 15 points over shuffled; got 45.6% and +12.3.
+Real run: train loss 0.15 vs 1.60 for shuffled, val flat after epoch 60, so the
+probe overfits 913 scenes.
 
 - Labels: sampled projection sheets put centres on the named objects. "Visible" is
   loose: only 30% of a frame's visible objects have their centre inside that frame.
