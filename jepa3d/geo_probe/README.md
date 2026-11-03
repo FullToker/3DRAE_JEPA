@@ -107,3 +107,7 @@ loss and schedule are unchanged. Clearly better than 45.6% quadrant: the neck
 loses position; about the same: the limit is earlier (DINOv2) or in the probe.
 
     STAGE=train MEMORY=dino TOKENS=real sbatch jepa3d/geo_probe/geo_probe.sbatch
+
+Result (job 12364, val visible objects): DINOv2 patches 51.3% quadrant [48.6, 54.3]
+vs 45.6% for 3DRAE tokens and 33.3% shuffled; azimuth error 34.5 deg vs 42.8 deg;
+position error 0.94 m vs 0.95 m. Better direction, same position; one seed, CIs not paired.
