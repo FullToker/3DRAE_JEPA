@@ -97,3 +97,13 @@ Fixed before running:
 | no clear gap to shuffled | position not readable | go back to 3DRAE, skip Llama supervision |
 
 The third row only counts if the overfit stage passed.
+
+## Control: DINOv2 patches without the neck
+
+`MEMORY=dino` (`dino_memory.py`): the probe reads the frozen DINOv2 patch features
+that go into the 3DRAE neck (8 views x 16 x 22 = 2816 tokens) plus each patch's
+Plucker ray (trainable linear layer) and a view index embedding. Probe, labels,
+loss and schedule are unchanged. Clearly better than 45.6% quadrant: the neck
+loses position; about the same: the limit is earlier (DINOv2) or in the probe.
+
+    STAGE=train MEMORY=dino TOKENS=real sbatch jepa3d/geo_probe/geo_probe.sbatch

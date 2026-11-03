@@ -12,10 +12,13 @@
 #   STAGE=labels                 build labels, write projection sheets
 #   STAGE=overfit                8 train scenes, fixed views, evaluated on those scenes
 #   STAGE=train TOKENS=real      main run (TOKENS=shuffled: category-prior baseline)
+#   MEMORY=dino                  DINOv2 patches + rays instead of 3DRAE neck tokens
 
 set -euo pipefail
 STAGE=${STAGE:-labels}
 TOKENS=${TOKENS:-real}
+MEMORY=${MEMORY:-3drae}
+NAME=$([ "$MEMORY" = 3drae ] && echo "$TOKENS" || echo "${MEMORY}_$TOKENS")
 
 ROOT="/glob/g01-cache/pf/Yushuo/3DRAE_JEPA"
 VJEPA="/glob/g01-cache/pf/Yushuo/vjepa201"
@@ -39,9 +42,9 @@ case "$STAGE" in
             --output outputs/geo_probe/overfit
         ;;
     train)
-        $RUN jepa3d/geo_probe/train.py $COMMON --tokens "$TOKENS" \
+        $RUN jepa3d/geo_probe/train.py $COMMON --tokens "$TOKENS" --memory "$MEMORY" \
             --train-labels data/geo_probe/labels_train.jsonl --val-labels data/geo_probe/labels_val.jsonl \
-            --output "outputs/geo_probe/$TOKENS"
+            --output "outputs/geo_probe/$NAME"
         ;;
     *)
         echo "unknown STAGE=$STAGE" >&2
