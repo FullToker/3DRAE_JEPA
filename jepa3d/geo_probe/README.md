@@ -111,3 +111,20 @@ loses position; about the same: the limit is earlier (DINOv2) or in the probe.
 Result (job 12364, val visible objects): DINOv2 patches 51.3% quadrant [48.6, 54.3]
 vs 45.6% for 3DRAE tokens and 33.3% shuffled; azimuth error 34.5 deg vs 42.8 deg;
 position error 0.94 m vs 0.95 m. Better direction, same position; one seed, CIs not paired.
+
+## Error breakdown (job 12365, `analyze.py`)
+
+Val objects are 1.97 m (median) from the first camera; an oracle that puts every
+object at the sample's true centroid errs by 1.53 m. Probe error (3DRAE / DINOv2):
+
+| | 3DRAE | DINOv2 |
+|---|---|---|
+| centre in no view / in 1 / in 2-3 views | 1.21 / 0.95 / 0.92 m | 1.13 / 0.96 / 0.94 m |
+| object 0-2 / 2-3 / 3-4 / 4-6 m from first camera | 0.74 / 1.11 / 1.61 / 2.30 m | 0.73 / 1.13 / 1.57 / 2.41 m |
+| category seen 0 / 1-9 / 10-49 / 50-199 / 200+ times in train (centre in a view) | 2.78 / 1.57 / 1.32 / 0.90 / 0.65 m | 2.65 / 1.51 / 1.26 / 0.94 / 0.72 m |
+| azimuth error, shorter arm 0.1-0.5 / 1-2 / 3+ m | 63 / 40 / 26 deg | 60 / 32 / 19 deg |
+
+Error follows category frequency far more than visibility (toilet 0.25 m, sink
+0.32 m; socket 1.75 m). With 8,838 train objects over 195 categories, the probe
+mostly has to learn which tokens are "the printer"; this run measures category
+grounding and geometry together, not geometry alone.
