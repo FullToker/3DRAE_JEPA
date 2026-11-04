@@ -18,13 +18,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from jepa3d.paths import VJEPA_ROOT
 from jepa3d.geo_probe.data import GeoProbeDataset, collate
-from jepa3d.geo_probe.dino_memory import DinoPatchMemory
+from jepa3d.geo_probe.dino_memory import DinoPatchMemory, dino_patches
 from jepa3d.geo_probe.probe import GeoProbe, SceneMetrics, probe_loss
-from jepa3d.x_encoder import ThreeDRAEXEncoder
+from jepa3d.x_encoder import ThreeDRAEXEncoder, unpack_cams
 
 TEXT_MODEL = "google/embeddinggemma-300m"
 
@@ -58,6 +59,40 @@ def text_batch(categories, embeddings, device):
     return text
 
 
+def point_queries(rae, batch, device):
+    """Point prompt: the DINOv2 feature of the patch holding the object's projected
+    centre in one view, plus that pixel's Plucker ray in the normalized first-camera
+    frame. Returns queries (B, O, C + 6) and which objects have a prompt (B, O)."""
+    images = batch["images"].to(device, non_blocking=True)
+    K, w2c = unpack_cams(batch["cams"].to(device, non_blocking=True))
+    feats = dino_patches(rae, images)                                    # (B, V, h, w, C)
+    prompt = batch["prompt"].to(device)
+    valid = prompt[..., 0] >= 0
+    view = prompt[..., 0].clamp(min=0).long()
+    u, v = prompt[..., 1].clamp(min=0), prompt[..., 2].clamp(min=0)
+    patch = rae.encoder.patch_size
+    h, w = feats.shape[2:4]
+    row = (v // patch).long().clamp(max=h - 1)
+    col = (u // patch).long().clamp(max=w - 1)
+    b = torch.arange(len(view), device=device)[:, None].expand_as(view)
+    feature = F.layer_norm(feats[b, view, row, col], feats.shape[-1:])
+    Kv, Ev = K[b, view].float(), w2c[b, view].float()
+    pixel = torch.stack([u, v, torch.ones_like(u)], dim=-1).unsqueeze(-1)
+    direction_cam = F.normalize(torch.linalg.solve(Kv, pixel).squeeze(-1), dim=-1)
+    rotation_t = Ev[..., :3, :3].transpose(-1, -2)
+    direction = (rotation_t @ direction_cam.unsqueeze(-1)).squeeze(-1)
+    center = -(rotation_t @ Ev[..., :3, 3:]).squeeze(-1)
+    ray = torch.cat([direction, torch.cross(center, direction, dim=-1)], dim=-1)
+    return torch.cat([feature, ray], dim=-1) * valid[..., None], valid
+
+
+def build_queries(kind, batch, embeddings, encoder, device):
+    """(queries (B, O, D), objects that can be queried (B, O))."""
+    if kind == "point":
+        return point_queries(encoder.rae, batch, device)
+    return text_batch(batch["categories"], embeddings, device), batch["mask"].to(device)
+
+
 def scene_tokens(encoder, batch, device, previous=None, shuffled=False, dino=None):
     """Tokens of the batch; shuffled = each sample gets another sample's tokens.
     previous covers a final batch of one, which has nobody to swap with.
@@ -78,7 +113,7 @@ def scene_tokens(encoder, batch, device, previous=None, shuffled=False, dino=Non
 
 
 @torch.no_grad()
-def evaluate(encoder, probe, loader, embeddings, device, shuffled: bool, dino=None) -> dict:
+def evaluate(encoder, probe, loader, embeddings, device, shuffled: bool, dino=None, query="category") -> dict:
     encoder.eval()
     probe.eval()
     if dino is not None:
@@ -88,11 +123,14 @@ def evaluate(encoder, probe, loader, embeddings, device, shuffled: bool, dino=No
     for batch in loader:
         tokens = scene_tokens(encoder, batch, device, previous, shuffled, dino)
         previous = tokens.detach()
-        text = text_batch(batch["categories"], embeddings, device)
-        pred = probe(text, tokens, batch["scale"].to(device)).cpu().numpy()
+        queries, valid = build_queries(query, batch, embeddings, encoder, device)
+        pred = probe(queries, tokens, batch["scale"].to(device)).cpu().numpy()
         target = batch["positions"].numpy()
+        valid = (valid.cpu() & batch["mask"]).numpy()
         for i, scene in enumerate(batch["scene"]):
-            keep = batch["mask"][i].numpy()
+            keep = valid[i]
+            if not keep.any():
+                continue
             metrics.update(scene, pred[i][keep], target[i][keep], batch["up"][i].numpy(),
                            batch["visible"][i].numpy()[keep])
     return metrics.summary()
@@ -107,6 +145,8 @@ def main() -> None:
     parser.add_argument("--tokens", choices=("real", "shuffled"), default="real")
     parser.add_argument("--memory", choices=("3drae", "dino"), default="3drae",
                         help="3drae: neck tokens + view tokens; dino: DINOv2 patches + rays, no neck")
+    parser.add_argument("--query", choices=("category", "point"), default="category",
+                        help="category: text embedding of the name; point: DINOv2 patch + ray at the projected centre")
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--lr", type=float, default=3e-4)
@@ -136,10 +176,14 @@ def main() -> None:
     val_loader = DataLoader(val_set, batch_size=args.batch_size, num_workers=args.num_workers, collate_fn=collate,
                             pin_memory=True)
 
-    categories = {o["category"] for s in train_set.scenes + val_set.scenes for o in s["objects"]}
-    embeddings = embed_categories(categories, device)
     encoder = ThreeDRAEXEncoder().to(device)
-    text_dim = next(iter(embeddings.values())).shape[-1]
+    if args.query == "point":
+        embeddings = None
+        text_dim = encoder.rae.encoder.hidden_size + 6
+    else:
+        categories = {o["category"] for s in train_set.scenes + val_set.scenes for o in s["objects"]}
+        embeddings = embed_categories(categories, device)
+        text_dim = next(iter(embeddings.values())).shape[-1]
     probe = GeoProbe(text_dim, encoder.dim).to(device)
 
     dino = DinoPatchMemory(encoder.rae.encoder.hidden_size).to(device) if args.memory == "dino" else None
@@ -159,13 +203,14 @@ def main() -> None:
             dino.train()
         running = {}
         for batch in train_loader:
-            mask = (batch["mask"] & batch["visible"]).to(device)
+            queries, valid = build_queries(args.query, batch, embeddings, encoder, device)
+            # point: objects whose centre is in a view; category: EmbodiedScan-visible objects
+            mask = valid & (batch["mask"] if args.query == "point" else batch["mask"] & batch["visible"]).to(device)
             target = batch["positions"].to(device, non_blocking=True)
             if mask.sum() == 0 or mask.shape[0] < 2:
                 continue
             tokens = scene_tokens(encoder, batch, device, shuffled=args.tokens == "shuffled", dino=dino)
-            pred = probe(text_batch(batch["categories"], embeddings, device), tokens,
-                         batch["scale"].to(device, non_blocking=True))
+            pred = probe(queries, tokens, batch["scale"].to(device, non_blocking=True))
             losses = probe_loss(pred, target, mask)
             optimizer.zero_grad(set_to_none=True)
             losses["loss"].backward()
@@ -177,7 +222,8 @@ def main() -> None:
                 running.setdefault(key, []).append(value.item())
         record = {"epoch": epoch, "step": step, **{k: sum(v) / len(v) for k, v in running.items()}}
         if epoch % args.eval_every == 0 and epoch != args.epochs:
-            record["val"] = evaluate(encoder, probe, val_loader, embeddings, device, args.tokens == "shuffled", dino)
+            record["val"] = evaluate(encoder, probe, val_loader, embeddings, device, args.tokens == "shuffled", dino,
+                                     args.query)
         print(json.dumps(record), flush=True)
         log.write(json.dumps(record) + "\n")
         log.flush()
@@ -185,8 +231,11 @@ def main() -> None:
     final = {
         "tokens_trained_on": args.tokens,
         "memory": args.memory,
-        "eval_real": evaluate(encoder, probe, val_loader, embeddings, device, shuffled=False, dino=dino),
-        "eval_shuffled": evaluate(encoder, probe, val_loader, embeddings, device, shuffled=True, dino=dino),
+        "query": args.query,
+        "eval_real": evaluate(encoder, probe, val_loader, embeddings, device, shuffled=False, dino=dino,
+                              query=args.query),
+        "eval_shuffled": evaluate(encoder, probe, val_loader, embeddings, device, shuffled=True, dino=dino,
+                                  query=args.query),
     }
     (output / "final_metrics.json").write_text(json.dumps(final, indent=2))
     trainable = dino.state_dict() if dino else {k: v for k, v in encoder.state_dict().items()

@@ -128,3 +128,24 @@ Error follows category frequency far more than visibility (toilet 0.25 m, sink
 0.32 m; socket 1.75 m). With 8,838 train objects over 195 categories, the probe
 mostly has to learn which tokens are "the printer"; this run measures category
 grounding and geometry together, not geometry alone.
+
+## Experiment 2: is the error grounding or geometry?
+
+The error breakdown fits "the probe cannot find the object from its name" but does
+not prove it (frequent categories are also large, distinctive furniture). Two tests:
+
+- Point prompt (`QUERY=point`): the query is the DINOv2 feature of the patch holding
+  the object's projected centre in one view (random view in training, the view where
+  it is nearest the image centre in val) plus that pixel's Plucker ray. No category
+  name, so no recognition; only objects whose centre is in a view. Same query for
+  every memory: 3DRAE tokens, DINOv2 patches, and shuffled 3DRAE tokens (floor: one
+  patch and its ray alone). If errors drop well below 1 m and stop following category
+  frequency, recognition was the limit.
+- Attention (`analyze.py --attention` on `dino_real`): share of each cross-attention
+  layer on the 3x3 / 7x7 patches around the object's projected centre, against
+  uniform, by category frequency and against the position error.
+
+    STAGE=train QUERY=point MEMORY=3drae TOKENS=real     sbatch jepa3d/geo_probe/geo_probe.sbatch
+    STAGE=train QUERY=point MEMORY=dino  TOKENS=real     sbatch jepa3d/geo_probe/geo_probe.sbatch
+    STAGE=train QUERY=point MEMORY=3drae TOKENS=shuffled sbatch jepa3d/geo_probe/geo_probe.sbatch
+    STAGE=analyze RUNS=dino_real ATTENTION_RUNS=dino_real sbatch jepa3d/geo_probe/geo_probe.sbatch

@@ -45,6 +45,21 @@ class GeoProbe(nn.Module):
             query = layer(query, memory)
         return self.head(query) * scale[:, None, None]
 
+    @torch.no_grad()
+    def attention_maps(self, text, tokens) -> list:
+        """Head-averaged cross-attention of each layer: [(B, O, N)]."""
+        query = self.query_proj(text)
+        memory = self.memory_proj(tokens)
+        maps = []
+        for layer in self.layers:
+            normed = layer.norm_memory(memory)
+            attended, weights = layer.attention(layer.norm_query(query), normed, normed, need_weights=True,
+                                                average_attn_weights=True)
+            maps.append(weights)
+            query = query + attended
+            query = query + layer.ffn(layer.norm_ffn(query))
+        return maps
+
 
 def pair_mask(target, mask):
     """Ordered pairs of masked objects far enough apart: (B, O, O)."""

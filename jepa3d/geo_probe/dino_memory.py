@@ -14,6 +14,19 @@ from jepa3d.x_encoder import unpack_cams
 from utils import plucker_rays_from_K_w2c
 
 
+def dino_patches(rae, images):
+    """Frozen DINOv2 patch features: images (B, V, 3, H, W) -> (B, V, h, w, C)."""
+    B, V, _, height, width = images.shape
+    patch = rae.encoder.patch_size
+    h, w = height // patch, width // patch
+    with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
+        normalized = (images - rae.image_mean.unsqueeze(1)) / rae.image_std.unsqueeze(1)
+        feats = rae.encoder(normalized.flatten(0, 1)).float()
+    if feats.shape[1] != h * w:
+        raise ValueError(f"expected {h * w} patches per view, got {feats.shape[1]}")
+    return feats.unflatten(0, (B, V)).unflatten(2, (h, w))
+
+
 class DinoPatchMemory(nn.Module):
     def __init__(self, feat_dim: int, max_views: int = 32):
         super().__init__()
@@ -27,15 +40,11 @@ class DinoPatchMemory(nn.Module):
         B, V, _, height, width = images.shape
         patch = rae.encoder.patch_size
         h, w = height // patch, width // patch
+        feats = dino_patches(rae, images).flatten(2, 3)                    # (B, V, P, C)
         with torch.no_grad():
-            with torch.autocast("cuda", dtype=torch.bfloat16):
-                normalized = (images - rae.image_mean.unsqueeze(1)) / rae.image_std.unsqueeze(1)
-                feats = rae.encoder(normalized.flatten(0, 1)).float()
-            if feats.shape[1] != h * w:
-                raise ValueError(f"expected {h * w} patches per view, got {feats.shape[1]}")
             K, w2c = unpack_cams(cams)
             rays = torch.stack([plucker_rays_from_K_w2c(k.float(), e.float(), height, width)
                                 for k, e in zip(K, w2c)])                       # (B, V, H, W, 6)
             rays = rays.reshape(B, V, h, patch, w, patch, 6).mean(dim=(3, 5)).flatten(2, 3)
-        tokens = self.norm(feats.unflatten(0, (B, V))) + self.ray_proj(rays) + self.view_embed.weight[:V, None]
+        tokens = self.norm(feats) + self.ray_proj(rays) + self.view_embed.weight[:V, None]
         return tokens.flatten(1, 2)

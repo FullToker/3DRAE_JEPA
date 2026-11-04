@@ -14,12 +14,16 @@
 #   STAGE=train TOKENS=real      main run (TOKENS=shuffled: category-prior baseline)
 #   STAGE=analyze                error breakdown of RUNS (default: real dino_real)
 #   MEMORY=dino                  DINOv2 patches + rays instead of 3DRAE neck tokens
+#   QUERY=point                  query = DINOv2 patch + ray at the object's projected centre
+#   ATTENTION_RUNS="dino_real"   analyze: also measure attention on the object's patches
 
 set -euo pipefail
 STAGE=${STAGE:-labels}
 TOKENS=${TOKENS:-real}
 MEMORY=${MEMORY:-3drae}
+QUERY=${QUERY:-category}
 NAME=$([ "$MEMORY" = 3drae ] && echo "$TOKENS" || echo "${MEMORY}_$TOKENS")
+[ "$QUERY" = point ] && NAME="point_${MEMORY}_$TOKENS"
 
 ROOT="/glob/g01-cache/pf/Yushuo/3DRAE_JEPA"
 VJEPA="/glob/g01-cache/pf/Yushuo/vjepa201"
@@ -43,15 +47,16 @@ case "$STAGE" in
             --output outputs/geo_probe/overfit
         ;;
     train)
-        $RUN jepa3d/geo_probe/train.py $COMMON --tokens "$TOKENS" --memory "$MEMORY" \
+        $RUN jepa3d/geo_probe/train.py $COMMON --tokens "$TOKENS" --memory "$MEMORY" --query "$QUERY" \
             --train-labels data/geo_probe/labels_train.jsonl --val-labels data/geo_probe/labels_val.jsonl \
             --output "outputs/geo_probe/$NAME"
         ;;
     analyze)
         for run in ${RUNS:-real dino_real}; do
             echo "=== $run"
-            $RUN jepa3d/geo_probe/analyze.py $COMMON --run "outputs/geo_probe/$run" \
-                --val-labels data/geo_probe/labels_val.jsonl
+            ATT=$(echo " ${ATTENTION_RUNS:-} " | grep -q " $run " && echo --attention || true)
+            $RUN jepa3d/geo_probe/analyze.py $COMMON --run "outputs/geo_probe/$run" $ATT \
+                --train-labels data/geo_probe/labels_train.jsonl --val-labels data/geo_probe/labels_val.jsonl
         done
         ;;
     *)

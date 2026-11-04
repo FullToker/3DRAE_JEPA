@@ -19,6 +19,32 @@ THRESHOLDS = {"min_valid_frac": 0.5, "min_median_depth": 0.6, "min_rel_sharpness
 IMAGE_SIZE = (224, 308)
 
 
+def point_prompts(points, K, w2c, size, pick_random: bool) -> np.ndarray:
+    """Where each object's centre shows up: (O, 3) [view, u, v] in input pixels,
+    view = -1 if the centre is inside no view. points (O, 3) in the normalized
+    first-camera frame, K (V, 3, 3) at input size, w2c (V, 4, 4) normalized.
+    pick_random picks among the views that see the centre (training); otherwise
+    the view where it lies closest to the image centre (evaluation)."""
+    height, width = size
+    hom = np.concatenate([points, np.ones((len(points), 1))], axis=1)
+    cam = np.einsum("vij,oj->voi", w2c, hom)[..., :3]
+    z = cam[..., 2]
+    uv = np.einsum("vij,voj->voi", K, cam)
+    u, v = uv[..., 0] / np.maximum(z, 1e-6), uv[..., 1] / np.maximum(z, 1e-6)
+    inside = (z > 0.1) & (u >= 0) & (u < width) & (v >= 0) & (v < height)
+    out = np.full((len(points), 3), -1.0)
+    for o in range(len(points)):
+        views = np.flatnonzero(inside[:, o])
+        if not len(views):
+            continue
+        if pick_random:
+            view = random.choice(views.tolist())
+        else:
+            view = views[np.argmin(np.hypot(u[views, o] - width / 2, v[views, o] - height / 2))]
+        out[o] = (view, u[view, o], v[view, o])
+    return out
+
+
 def to_first_camera(centers: np.ndarray, axis_align: np.ndarray, pose_0: np.ndarray) -> np.ndarray:
     """Box centres (N, 3) in the axis-aligned frame -> first camera's frame, metres."""
     transform = np.linalg.inv(axis_align @ pose_0)
@@ -88,16 +114,21 @@ class GeoProbeDataset(Dataset):
                                      "intrinsics": [scene["pool"].K.tolist()] * len(frames),
                                      "c2w": c2w.tolist()}, IMAGE_SIZE)
         centers = np.array([o["center"] for o in scene["objects"]])
+        positions = to_first_camera(centers, scene["axis_align"], pose_0)
         relative = np.linalg.inv(pose_0) @ c2w
+        scale = float(np.linalg.norm(relative[:, :3, 3], axis=-1).max())
+        prompt = point_prompts(positions / scale, K.numpy().astype(np.float64), w2c.numpy().astype(np.float64),
+                               IMAGE_SIZE, pick_random=seed is None)
         return {
             "scene": scene["scene"],
             "images": images.clamp(0, 1),
             "cams": torch.cat([K.flatten(1), w2c.flatten(1)], dim=1),
             "categories": [o["category"] for o in scene["objects"]],
-            "positions": torch.from_numpy(to_first_camera(centers, scene["axis_align"], pose_0)).float(),
+            "positions": torch.from_numpy(positions).float(),
+            "prompt": torch.from_numpy(prompt).float(),
             "visible": torch.from_numpy(visible),
             # Same scale as jepa3d.data.normalize_cameras divides the poses by.
-            "scale": float(np.linalg.norm(relative[:, :3, 3], axis=-1).max()),
+            "scale": scale,
             # Raw ScanNet world z (up) in the first camera's frame.
             "up": torch.from_numpy(np.linalg.inv(pose_0)[:3, 2].copy()).float(),
         }
@@ -108,9 +139,11 @@ def collate(batch):
     positions = torch.zeros(len(batch), objects, 3)
     visible = torch.zeros(len(batch), objects, dtype=torch.bool)
     mask = torch.zeros(len(batch), objects, dtype=torch.bool)
+    prompt = torch.full((len(batch), objects, 3), -1.0)
     for i, s in enumerate(batch):
         n = len(s["categories"])
         positions[i, :n] = s["positions"]
+        prompt[i, :n] = s["prompt"]
         visible[i, :n] = s["visible"]
         mask[i, :n] = True
     images = torch.stack([s["images"] for s in batch])
@@ -124,6 +157,7 @@ def collate(batch):
         "positions": positions,
         "visible": visible,
         "mask": mask,
+        "prompt": prompt,
         "scale": torch.tensor([s["scale"] for s in batch], dtype=torch.float32),
         "up": torch.stack([s["up"] for s in batch]),
     }
