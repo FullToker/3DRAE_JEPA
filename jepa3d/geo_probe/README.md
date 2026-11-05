@@ -149,3 +149,28 @@ not prove it (frequent categories are also large, distinctive furniture). Two te
     STAGE=train QUERY=point MEMORY=dino  TOKENS=real     sbatch jepa3d/geo_probe/geo_probe.sbatch
     STAGE=train QUERY=point MEMORY=3drae TOKENS=shuffled sbatch jepa3d/geo_probe/geo_probe.sbatch
     STAGE=analyze RUNS=dino_real ATTENTION_RUNS=dino_real sbatch jepa3d/geo_probe/geo_probe.sbatch
+
+### Results (jobs 12368-12372, val, objects whose centre is in a view)
+
+Attention, category query on DINOv2 patches (12371): layer-1 share on the 7x7 patches
+around the centre is 1.5x uniform for unseen categories, 2.1x for 1-9 train objects,
+6.7-8.2x for 50+; position error by layer-1 attention tertile 1.41 / 0.91 / 0.76 m.
+
+Point prompt:
+
+| | 3DRAE tokens | DINOv2 patches | shuffled 3DRAE (floor) | category query, 3DRAE |
+|---|---|---|---|---|
+| position error, median | 0.27 m [0.25, 0.30] | 0.52 m [0.48, 0.56] | 0.68 m | 0.95 m |
+| pair distance error, median | 0.21 m | 0.42 m | 0.55 m | 0.64 m |
+| azimuth error, median | 8.0 deg | 10.8 deg | 15.5 deg | 42.8 deg |
+| quadrant acc | 83.3% [81.9, 84.8] | 78.9% | 71.5% | 45.6% |
+| same model, tokens shuffled at eval | 1.17 m, 66.8% | 1.15 m, 65.1% | - | - |
+| error by train frequency 0 / 1-9 / 10-49 / 50-199 / 200+ | 0.42 / 0.35 / 0.29 / 0.27 / 0.27 m | 0.71 / 0.67 / 0.52 / 0.51 / 0.51 m | | 2.78 / 1.57 / 1.32 / 0.90 / 0.65 m |
+| error, object 0-2 / 2-3 / 3-4 / 4-6 m from first camera | 0.22 / 0.28 / 0.40 / 0.60 m | 0.41 / 0.58 / 0.71 / 1.11 m | | |
+
+The category-query column is from experiment 1 (visible objects) and covers a
+slightly different object set. With the object located for it, the probe reads
+positions from 3DRAE tokens to 0.27 m, about 13% of the distance from the first
+camera, and the frequency dependence is mostly gone. The 3DRAE neck does not lose
+geometry: its tokens beat raw DINOv2 patches by about 2x. Experiment 1 was limited
+by finding the object from its name, not by geometry.
