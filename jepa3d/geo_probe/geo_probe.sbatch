@@ -13,6 +13,7 @@
 #   STAGE=overfit                8 train scenes, fixed views, evaluated on those scenes
 #   STAGE=train TOKENS=real      main run (TOKENS=shuffled: category-prior baseline)
 #   STAGE=analyze                error breakdown of RUNS (default: real dino_real)
+#   STAGE=report                 execute vggt_probe_report.ipynb in place (no GPU needed)
 #   MEMORY=dino                  DINOv2 patches + rays instead of 3DRAE neck tokens
 #   MEMORY=vggt                  VGGT aggregator patch tokens + rays
 #   MEMORY_SIZE="378 518"        input size of a dino / vggt memory (default 224 308)
@@ -65,6 +66,9 @@ case "$STAGE" in
             $RUN jepa3d/geo_probe/analyze.py $COMMON --run "outputs/geo_probe/$run" $ATT \
                 --train-labels data/geo_probe/labels_train.jsonl --val-labels data/geo_probe/labels_val.jsonl
         done
+        ;;
+    report)
+        $RUN -m jupyter nbconvert --to notebook --execute --inplace jepa3d/geo_probe/vggt_probe_report.ipynb
         ;;
     *)
         echo "unknown STAGE=$STAGE" >&2
