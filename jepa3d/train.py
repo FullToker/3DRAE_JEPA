@@ -26,6 +26,7 @@ from fusion_gv.gvjepa_trainer import GVJEPATrainer, build_optimizer_and_schedule
 from fusion_gv.mlflow_utils import start_mlflow_run
 from jepa3d.data import build_loader
 from jepa3d.model import build_model_from_config
+from jepa3d.trainer import HardNegTrainer
 
 
 def _set_seed(seed: int) -> None:
@@ -100,6 +101,7 @@ def main() -> None:
                     gradient_accumulation_steps=1)
         scheduler = None
         val_loader = None
+        cfg.setdefault("mlflow", {})["enabled"] = False
 
     output_dir = Path(tcfg["output_dir"])
     config_copy = None
@@ -111,7 +113,12 @@ def main() -> None:
     with start_mlflow_run(cfg if accelerator.is_main_process else {}) as mlflow_logger:
         if config_copy and getattr(mlflow_logger, "enabled", False):
             mlflow_logger.log_artifact(config_copy)
-        GVJEPATrainer(
+        # data.num_negatives > 0: InfoNCE + train.hard_weight * hard-negative term
+        if cfg["data"].get("num_negatives", 0):
+            trainer_cls, extra = HardNegTrainer, {"hard_weight": tcfg.get("hard_weight", 1.0)}
+        else:
+            trainer_cls, extra = GVJEPATrainer, {}
+        trainer_cls(
             model=model,
             optimizer=optimizer,
             train_loader=loader,
@@ -128,6 +135,7 @@ def main() -> None:
             save_every=tcfg.get("save_every", 0),
             mlflow_logger=mlflow_logger,
             accelerator=accelerator,
+            **extra,
         ).fit()
 
 

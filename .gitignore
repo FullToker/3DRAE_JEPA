@@ -11,3 +11,7 @@ outputs/
 
 # Generated manifests (server-side)
 data/
+
+# Per-experiment folders: data / ckpt / logs / results stay on the server, notebooks are tracked
+experiments/*/*
+!experiments/*/notebooks/

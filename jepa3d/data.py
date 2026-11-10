@@ -11,6 +11,7 @@ The batch keeps fusion_gv's key names so GVJEPATrainer runs unchanged:
 """
 
 import functools
+import random
 from typing import Any, Dict, List
 
 import numpy as np
@@ -29,16 +30,25 @@ class PosedSparDataset(GVJEPADataset):
     """mask_key: row field passed on as "group_id". GVJEPATrainer masks
     off-diagonal InfoNCE pairs with equal group_id, so "answer_key" keeps
     same-answer rows from being each other's negatives (manifests from
-    jepa3d/tools/sample_*.py); "group_id" masks same-scene pairs instead."""
+    jepa3d/tools/sample_*.py); "group_id" masks same-scene pairs instead.
 
-    def __init__(self, manifest_path, max_views: int | None = None, mask_key: str = "group_id"):
+    num_negatives: how many of the row's "negatives" (same-question wrong
+    answers, jepa3d/tools/add_hard_negatives.py) to pass on: 0 none, k > 0 a
+    random k per draw, -1 all."""
+
+    def __init__(self, manifest_path, max_views: int | None = None, mask_key: str = "group_id",
+                 num_negatives: int = 0):
         super().__init__(manifest_path, num_frames=None)
         self.max_views = max_views
         self.mask_key = mask_key
+        self.num_negatives = num_negatives
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         row = self._read_row(idx)
         n = len(row["images"]) if self.max_views is None else self.max_views
+        negatives = (row.get("negatives") or []) if self.num_negatives else []
+        if 0 < self.num_negatives < len(negatives):
+            negatives = random.sample(negatives, self.num_negatives)
         return {
             "image_paths": row["images"][:n],
             "intrinsics": row["intrinsics"][:n],
@@ -46,6 +56,7 @@ class PosedSparDataset(GVJEPADataset):
             "query": row.get("query", ""),
             "target": row["target"],
             "group_id": row.get(self.mask_key),
+            "negatives": negatives,
             "row": row,
         }
 
@@ -93,13 +104,16 @@ def spar3d_collate(batch: List[Dict[str, Any]], image_size=(224, 308)) -> Dict[s
         "target": [s["target"] for s in batch],
         "boxes": [None] * len(batch),
         "group_id": [s["group_id"] for s in batch],
+        "negatives": [s["negatives"] for s in batch],
         "rows": [s["row"] for s in batch],
     }
 
 
 def build_loader(manifests, cfg: dict, batch_size: int, train: bool = True, limit: int = 0) -> DataLoader:
     dcfg = cfg["data"]
-    datasets = [PosedSparDataset(p, dcfg.get("max_views"), dcfg.get("mask_key", "group_id")) for p in manifests]
+    k = dcfg.get("num_negatives", 0)
+    k = k if train or not k else -1   # training samples k per draw, validation scores all
+    datasets = [PosedSparDataset(p, dcfg.get("max_views"), dcfg.get("mask_key", "group_id"), k) for p in manifests]
     ds = datasets[0] if len(datasets) == 1 else ConcatDataset(datasets)
     if limit:
         ds = Subset(ds, range(min(limit, len(ds))))

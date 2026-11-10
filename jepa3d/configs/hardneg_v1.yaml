@@ -1,0 +1,101 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# hardneg_v1: sft_3drae_mix_f8_long + same-question wrong answers as negatives
+# ──────────────────────────────────────────────────────────────────────────────
+#
+# Why: the mix checkpoints score the same on VSI-Bench with real, shuffled or
+# zero scene tokens (jepa3d/tools/blind_check.py). In-batch negatives name
+# other objects than the query, so the text alone separates them.
+#
+# Change: loss = InfoNCE (as before) + hard_weight * hard, where hard is the
+# cross-entropy of the prediction against [target, up to num_negatives wrong
+# answers to the same question] (jepa3d/trainer.py, jepa3d/hard_negatives.py).
+# Negatives exist for VSI-590K multiple choice and SPAR spatial_imagination /
+# appearance_order rows; numeric rows only take part in InfoNCE.
+#
+# Data (jepa3d/trainbatch/hardneg_data.sbatch): data/mix_vsi_spar_train_f8.jsonl
+# with "negatives" added and 1 scene in 20 held out (VSI and SPAR rows alike).
+# The training set is therefore ~5% smaller than in sft_3drae_mix_f8_long.
+#
+# Everything of this experiment lives in experiments/hardneg_v1/ on the server:
+#   data/ (manifests)  ckpt/ (checkpoint + train logs)  results/  logs/  notebooks/
+#
+# Run: see jepa3d/trainbatch/hardneg_train.sbatch
+# ──────────────────────────────────────────────────────────────────────────────
+
+init_vljepa_ckpt: ${VJEPA_ROOT}/ckpts/open_vljepa/best.pt
+
+rae:
+  feature_config: configs/models/dino2_feature.yaml   # relative to this repo
+  max_views: 32
+
+fusion:
+  x_encoder_type: 3drae
+  x_encoder_output_dim: 768
+
+model:
+  query_model_name: meta-llama/Llama-3.2-1B
+  predictor_llama_layers: 8
+  max_query_tokens: 256
+  y_encoder_name: google/embeddinggemma-300m
+  max_target_tokens: 256
+  shared_embed_dim: 1536
+  y_encoder_lr_multiplier: 0.05
+  hf_cache_dir: ${VJEPA_ROOT}/ckpts
+
+data:
+  train_manifests:
+    - ${RAE_ROOT}/experiments/hardneg_v1/data/train_f8.jsonl
+  val_manifests:
+    - ${RAE_ROOT}/experiments/hardneg_v1/data/holdout_f8.jsonl   # shuffled, all rows have negatives
+  mask_key: answer_key   # InfoNCE: equal answer_key pairs are masked
+  num_negatives: 3       # wrong answers per row in training (4-way choice); validation scores all
+  image_size: [224, 308]    # (H, W), multiple of 14, ScanNet aspect, as 3DRAE's ScanNet examples
+  num_workers: 8
+  val_num_workers: 2
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 2
+
+train:
+  seed: 42
+  device: cuda
+  precision: bf16
+  output_dir: ${RAE_ROOT}/experiments/hardneg_v1/ckpt
+
+  batch_size: 32
+  gradient_accumulation_steps: 4
+  # effective batch = 32 * 4 * 3 GPUs = 384. max_steps counts per-rank
+  # micro-batches: 6870 * 32 * 3 = 660k samples = about 1 epoch of train_f8.jsonl
+  # (about 95% of 694,280 rows; exact count in train_f8.jsonl.stats.json)
+  # = 1717 optimizer updates.
+  max_steps: 6870
+  hard_weight: 1.0
+
+  clip_grad_norm: 1.0
+  log_every: 50
+  save_every: 0      # final.pt only (~11 GB)
+  val_every: 500
+  val_max_batches: 60   # 1920 holdout rows
+  val_batch_size: 32
+
+  learning_rate: 1.0e-4
+  min_lr: 1.0e-5
+  warmup_steps: 200   # optimizer updates
+  weight_decay: 0.01
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-8
+  scheduler: cosine
+  temperature: 0.07
+
+mlflow:
+  enabled: true
+  env_file: ${VJEPA_ROOT}/.env/mlflow.env
+  tracking_uri: "file:///glob/g01-cache/pf/Yushuo/mlruns"
+  experiment_name: vljepa_sft_from_ckpt
+  run_name: hardneg_v1
+  log_params: true
+  tags:
+    project: vljepa-3drae
+    variant: A-3drae-dino2-1024
+    data: vsi590k-spar-f8-hardneg
