@@ -10,7 +10,7 @@ Runs a final.pt on the val scenes and breaks the errors down by
   - pair distance, for the azimuth error.
 Reference: an oracle that puts every object at the mean of the sample's true positions.
 
---attention (DINOv2-memory runs only, whose tokens are image patches): share of
+--attention (DINOv2 / VGGT memory runs only, whose tokens are image patches): share of
 each layer's attention on the patches around the object's projected centre, in
 every view that sees the centre, against the share a uniform attention would give.
 
@@ -34,9 +34,8 @@ from torch.utils.data import DataLoader
 
 from jepa3d.paths import VJEPA_ROOT  # noqa: F401  (sets sys.path)
 from jepa3d.geo_probe.data import GeoProbeDataset, collate
-from jepa3d.geo_probe.dino_memory import DinoPatchMemory
 from jepa3d.geo_probe.probe import MIN_PAIR_DISTANCE, GeoProbe, angular_error, azimuths, quadrant
-from jepa3d.geo_probe.train import build_queries, embed_categories, scene_tokens
+from jepa3d.geo_probe.train import build_patch_memory, build_queries, embed_categories, scene_tokens
 from jepa3d.x_encoder import ThreeDRAEXEncoder, unpack_cams
 
 FREQ_BINS = ((0, 0), (1, 9), (10, 49), (50, 199), (200, 10**9))
@@ -103,10 +102,11 @@ def main() -> None:
     train_args = ckpt["args"]
     query = train_args.get("query", "category")
     memory = train_args.get("memory", "3drae")
-    if args.attention and memory != "dino":
-        raise ValueError("--attention needs a DINOv2-memory run: 3DRAE tokens have no image position")
+    if args.attention and memory == "3drae":
+        raise ValueError("--attention needs a DINOv2 / VGGT memory run: 3DRAE tokens have no image position")
     device = torch.device("cuda")
-    val_set = GeoProbeDataset(args.val_labels, args.stats, seeds=list(range(train_args["val_seeds"])))
+    val_set = GeoProbeDataset(args.val_labels, args.stats, seeds=list(range(train_args["val_seeds"])),
+                              memory_size=train_args.get("memory_size"))
     loader = DataLoader(val_set, batch_size=args.batch_size, num_workers=args.num_workers, collate_fn=collate)
 
     encoder = ThreeDRAEXEncoder().to(device).eval()
@@ -115,12 +115,12 @@ def main() -> None:
     else:
         embeddings = embed_categories({o["category"] for s in val_set.scenes for o in s["objects"]}, device)
         text_dim = next(iter(embeddings.values())).shape[-1]
-    probe = GeoProbe(text_dim, encoder.dim).to(device).eval()
+    dino = build_patch_memory(memory, encoder, device)
+    probe = GeoProbe(text_dim, dino.module.feat_dim if dino else encoder.dim).to(device).eval()
     probe.load_state_dict(ckpt["probe"])
-    dino = None
-    if memory == "dino":
-        dino = DinoPatchMemory(encoder.rae.encoder.hidden_size).to(device).eval()
-        dino.load_state_dict(ckpt["encoder_trainable"])
+    if dino is not None:
+        dino.module.eval()
+        dino.module.load_state_dict(ckpt["encoder_trainable"])
     else:
         missing, unexpected = encoder.load_state_dict(ckpt["encoder_trainable"], strict=False)
         assert not unexpected and all(k.startswith("rae.") for k in missing)
@@ -138,14 +138,16 @@ def main() -> None:
             pred = probe(queries, tokens, batch["scale"].to(device)).cpu()
             maps = [m.float().cpu().numpy() for m in probe.attention_maps(queries, tokens)] if args.attention else None
             valid = (valid.cpu() & batch["mask"]).numpy()
-            size = batch["images"].shape[-2:]
+            # the memory's own resolution, so attention windows index its patch grid
+            size = batch.get("memory_images", batch["images"]).shape[-2:]
+            cams = batch.get("memory_cams", batch["cams"])
             h, w = size[0] // patch, size[1] // patch
             for i in range(len(batch["scene"])):
                 n = int(batch["mask"][i].sum())
                 p, t = pred[i, :n].numpy(), batch["positions"][i, :n].numpy()
                 s = float(batch["scale"][i])
                 scales.append(s)
-                u, v, inside = project(batch["positions"][i, :n], batch["cams"][i], s, size)
+                u, v, inside = project(batch["positions"][i, :n], cams[i], s, size)
                 windows = window_masks(u, v, inside, h, w, patch) if args.attention else None
                 centroid = t.mean(0)
                 for j in range(n):

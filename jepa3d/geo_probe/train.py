@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Train the geometry probe on frozen 3DRAE tokens and evaluate on unseen scenes.
+"""Train the geometry probe on frozen 3DRAE / DINOv2 / VGGT tokens and evaluate on unseen scenes.
 
 Usage (from the repo root), see README.md:
     python jepa3d/geo_probe/train.py --train-labels data/geo_probe/labels_train.jsonl \
@@ -25,6 +25,7 @@ from jepa3d.paths import VJEPA_ROOT
 from jepa3d.geo_probe.data import GeoProbeDataset, collate
 from jepa3d.geo_probe.dino_memory import DinoPatchMemory, dino_patches
 from jepa3d.geo_probe.probe import GeoProbe, SceneMetrics, probe_loss
+from jepa3d.geo_probe.vggt_memory import VggtPatchMemory, load_vggt
 from jepa3d.x_encoder import ThreeDRAEXEncoder, unpack_cams
 
 TEXT_MODEL = "google/embeddinggemma-300m"
@@ -93,15 +94,36 @@ def build_queries(kind, batch, embeddings, encoder, device):
     return text_batch(batch["categories"], embeddings, device), batch["mask"].to(device)
 
 
+class PatchTokens:
+    """A trainable patch memory (DINOv2 or VGGT) with its frozen backbone."""
+
+    def __init__(self, module, backbone):
+        self.module, self.backbone = module, backbone
+
+    def __call__(self, batch, device):
+        images = batch.get("memory_images", batch["images"]).to(device, non_blocking=True)
+        cams = batch.get("memory_cams", batch["cams"]).to(device, non_blocking=True)
+        return self.module(self.backbone, images, cams)
+
+
+def build_patch_memory(kind, encoder, device):
+    """None for 3DRAE's own tokens."""
+    if kind == "dino":
+        return PatchTokens(DinoPatchMemory(encoder.rae.encoder.hidden_size).to(device), encoder.rae)
+    if kind == "vggt":
+        return PatchTokens(VggtPatchMemory().to(device), load_vggt(device))
+    return None
+
+
 def scene_tokens(encoder, batch, device, previous=None, shuffled=False, dino=None):
     """Tokens of the batch; shuffled = each sample gets another sample's tokens.
     previous covers a final batch of one, which has nobody to swap with.
-    dino: a DinoPatchMemory, to read DINOv2 patches instead of 3DRAE's tokens."""
-    images = batch["images"].to(device, non_blocking=True)
-    cams = batch["cams"].to(device, non_blocking=True)
+    dino: a PatchTokens, to read DINOv2 / VGGT patches instead of 3DRAE's tokens."""
     if dino is not None:
-        tokens = dino(encoder.rae, images, cams)
+        tokens = dino(batch, device)
     else:
+        images = batch["images"].to(device, non_blocking=True)
+        cams = batch["cams"].to(device, non_blocking=True)
         with torch.autocast("cuda", dtype=torch.bfloat16):
             tokens = encoder(images, cams)
     tokens = tokens.float()
@@ -117,7 +139,7 @@ def evaluate(encoder, probe, loader, embeddings, device, shuffled: bool, dino=No
     encoder.eval()
     probe.eval()
     if dino is not None:
-        dino.eval()
+        dino.module.eval()
     metrics = SceneMetrics()
     previous = None
     for batch in loader:
@@ -143,8 +165,11 @@ def main() -> None:
     parser.add_argument("--stats", nargs="+", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--tokens", choices=("real", "shuffled"), default="real")
-    parser.add_argument("--memory", choices=("3drae", "dino"), default="3drae",
-                        help="3drae: neck tokens + view tokens; dino: DINOv2 patches + rays, no neck")
+    parser.add_argument("--memory", choices=("3drae", "dino", "vggt"), default="3drae",
+                        help="3drae: neck tokens + view tokens; dino: DINOv2 patches + rays, no neck; "
+                             "vggt: VGGT aggregator patch tokens + rays")
+    parser.add_argument("--memory-size", type=int, nargs=2, metavar=("H", "W"),
+                        help="input size of a dino / vggt memory, multiples of 14 (default 224 308)")
     parser.add_argument("--query", choices=("category", "point"), default="category",
                         help="category: text embedding of the name; point: DINOv2 patch + ray at the projected centre")
     parser.add_argument("--epochs", type=int, default=100)
@@ -167,9 +192,12 @@ def main() -> None:
     output.mkdir(parents=True, exist_ok=True)
     (output / "args.json").write_text(json.dumps(vars(args), indent=2))
 
+    if args.memory_size and args.memory == "3drae":
+        parser.error("--memory-size needs --memory dino or vggt")
     train_set = GeoProbeDataset(args.train_labels, args.stats, limit=args.limit,
-                                seeds=[0] if args.fixed_views else None)
-    val_set = GeoProbeDataset(args.val_labels, args.stats, limit=args.limit, seeds=list(range(args.val_seeds)))
+                                seeds=[0] if args.fixed_views else None, memory_size=args.memory_size)
+    val_set = GeoProbeDataset(args.val_labels, args.stats, limit=args.limit, seeds=list(range(args.val_seeds)),
+                              memory_size=args.memory_size)
     train_loader = DataLoader(train_set, batch_size=min(args.batch_size, len(train_set)), shuffle=True, drop_last=True,
                               num_workers=args.num_workers, collate_fn=collate, pin_memory=True,
                               persistent_workers=args.num_workers > 0)
@@ -184,10 +212,9 @@ def main() -> None:
         categories = {o["category"] for s in train_set.scenes + val_set.scenes for o in s["objects"]}
         embeddings = embed_categories(categories, device)
         text_dim = next(iter(embeddings.values())).shape[-1]
-    probe = GeoProbe(text_dim, encoder.dim).to(device)
-
-    dino = DinoPatchMemory(encoder.rae.encoder.hidden_size).to(device) if args.memory == "dino" else None
-    memory_params = list(dino.parameters()) if dino else [p for p in encoder.parameters() if p.requires_grad]
+    dino = build_patch_memory(args.memory, encoder, device)
+    probe = GeoProbe(text_dim, dino.module.feat_dim if dino else encoder.dim).to(device)
+    memory_params = list(dino.module.parameters()) if dino else [p for p in encoder.parameters() if p.requires_grad]
     params = memory_params + list(probe.parameters())
     optimizer = torch.optim.AdamW(params, lr=args.lr, weight_decay=args.weight_decay)
     total = args.epochs * len(train_loader)
@@ -200,7 +227,7 @@ def main() -> None:
         encoder.train()
         probe.train()
         if dino is not None:
-            dino.train()
+            dino.module.train()
         running = {}
         for batch in train_loader:
             queries, valid = build_queries(args.query, batch, embeddings, encoder, device)
@@ -238,7 +265,7 @@ def main() -> None:
                                   query=args.query),
     }
     (output / "final_metrics.json").write_text(json.dumps(final, indent=2))
-    trainable = dino.state_dict() if dino else {k: v for k, v in encoder.state_dict().items()
+    trainable = dino.module.state_dict() if dino else {k: v for k, v in encoder.state_dict().items()
                                                  if not k.startswith("rae.")}
     torch.save({"probe": probe.state_dict(), "encoder_trainable": trainable, "args": vars(args)}, output / "final.pt")
     print(json.dumps(final), flush=True)

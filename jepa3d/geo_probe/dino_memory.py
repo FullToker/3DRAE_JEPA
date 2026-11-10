@@ -27,20 +27,21 @@ def dino_patches(rae, images):
     return feats.unflatten(0, (B, V)).unflatten(2, (h, w))
 
 
-class DinoPatchMemory(nn.Module):
+class PatchMemory(nn.Module):
+    """Frozen patch features + each patch's Plucker ray + a view index embedding."""
+
     def __init__(self, feat_dim: int, max_views: int = 32):
         super().__init__()
+        self.feat_dim = feat_dim
         self.norm = nn.LayerNorm(feat_dim)
         self.ray_proj = nn.Linear(6, feat_dim)
         self.view_embed = nn.Embedding(max_views, feat_dim)
         nn.init.normal_(self.view_embed.weight, std=0.02)
 
-    def forward(self, rae, images, cams):
-        """images (B, V, 3, H, W), cams (B, V, 25) -> tokens (B, V * P, C)."""
-        B, V, _, height, width = images.shape
-        patch = rae.encoder.patch_size
+    def embed(self, feats, cams, height: int, width: int, patch: int):
+        """feats (B, V, P, C) of a (height, width) input, cams (B, V, 25) -> tokens (B, V * P, C)."""
+        B, V = feats.shape[:2]
         h, w = height // patch, width // patch
-        feats = dino_patches(rae, images).flatten(2, 3)                    # (B, V, P, C)
         with torch.no_grad():
             K, w2c = unpack_cams(cams)
             rays = torch.stack([plucker_rays_from_K_w2c(k.float(), e.float(), height, width)
@@ -48,3 +49,10 @@ class DinoPatchMemory(nn.Module):
             rays = rays.reshape(B, V, h, patch, w, patch, 6).mean(dim=(3, 5)).flatten(2, 3)
         tokens = self.norm(feats) + self.ray_proj(rays) + self.view_embed.weight[:V, None]
         return tokens.flatten(1, 2)
+
+
+class DinoPatchMemory(PatchMemory):
+    def forward(self, rae, images, cams):
+        """images (B, V, 3, H, W), cams (B, V, 25) -> tokens (B, V * P, C)."""
+        feats = dino_patches(rae, images).flatten(2, 3)                    # (B, V, P, C)
+        return self.embed(feats, cams, *images.shape[-2:], rae.encoder.patch_size)

@@ -53,9 +53,14 @@ def to_first_camera(centers: np.ndarray, axis_align: np.ndarray, pose_0: np.ndar
 
 class GeoProbeDataset(Dataset):
     """seeds=None draws a new view subset per sample. Otherwise one sample per
-    (scene, seed), with the views fixed by that seed."""
+    (scene, seed), with the views fixed by that seed. memory_size: also load the
+    views at this (height, width), for a memory that reads another resolution."""
 
-    def __init__(self, labels_path, stats_paths, num_views=8, limit=0, seeds=None, min_objects=2):
+    def __init__(self, labels_path, stats_paths, num_views=8, limit=0, seeds=None, min_objects=2,
+                 memory_size=None):
+        self.memory_size = tuple(memory_size) if memory_size else None
+        if self.memory_size == IMAGE_SIZE:
+            self.memory_size = None
         stats = load_stats(stats_paths)
         with open(labels_path) as f:
             rows = [json.loads(line) for line in f]
@@ -110,16 +115,22 @@ class GeoProbeDataset(Dataset):
 
         pose_0 = frames[0].c2w
         c2w = np.stack([f.c2w for f in frames])
-        images, K, w2c = load_views({"image_paths": [f.image for f in frames],
-                                     "intrinsics": [scene["pool"].K.tolist()] * len(frames),
-                                     "c2w": c2w.tolist()}, IMAGE_SIZE)
+        views = {"image_paths": [f.image for f in frames],
+                 "intrinsics": [scene["pool"].K.tolist()] * len(frames), "c2w": c2w.tolist()}
+        images, K, w2c = load_views(views, IMAGE_SIZE)
         centers = np.array([o["center"] for o in scene["objects"]])
         positions = to_first_camera(centers, scene["axis_align"], pose_0)
         relative = np.linalg.inv(pose_0) @ c2w
         scale = float(np.linalg.norm(relative[:, :3, 3], axis=-1).max())
         prompt = point_prompts(positions / scale, K.numpy().astype(np.float64), w2c.numpy().astype(np.float64),
                                IMAGE_SIZE, pick_random=seed is None)
+        extra = {}
+        if self.memory_size:
+            big, big_K, big_w2c = load_views(views, self.memory_size)
+            extra = {"memory_images": big.clamp(0, 1),
+                     "memory_cams": torch.cat([big_K.flatten(1), big_w2c.flatten(1)], dim=1)}
         return {
+            **extra,
             "scene": scene["scene"],
             "images": images.clamp(0, 1),
             "cams": torch.cat([K.flatten(1), w2c.flatten(1)], dim=1),
@@ -149,7 +160,9 @@ def collate(batch):
     images = torch.stack([s["images"] for s in batch])
     cams = torch.stack([s["cams"] for s in batch])
     assert cams.shape[-1] == CAM_DIM
+    extra = {key: torch.stack([s[key] for s in batch]) for key in ("memory_images", "memory_cams") if key in batch[0]}
     return {
+        **extra,
         "scene": [s["scene"] for s in batch],
         "images": images,
         "cams": cams,
