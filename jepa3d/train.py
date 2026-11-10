@@ -91,6 +91,8 @@ def main() -> None:
         build_loader(val_manifests, cfg, tcfg.get("val_batch_size", tcfg["batch_size"]), train=False)
         if val_manifests else None
     )
+    if args.overfit:
+        tcfg["scheduler"] = "constant"   # a discarded warmup schedule would leave lr at its first value
     optimizer, scheduler = build_optimizer_and_scheduler_from_config(model, cfg)
     # Scheduler deliberately not prepared: it steps once per optimizer update on every rank.
     model, optimizer, loader = accelerator.prepare(model, optimizer, loader)
