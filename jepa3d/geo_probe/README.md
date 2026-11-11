@@ -174,3 +174,24 @@ positions from 3DRAE tokens to 0.27 m, about 13% of the distance from the first
 camera, and the frequency dependence is mostly gone. The 3DRAE neck does not lose
 geometry: its tokens beat raw DINOv2 patches by about 2x. Experiment 1 was limited
 by finding the object from its name, not by geometry.
+
+## Experiment 3: the same probe on VGGT tokens
+
+`MEMORY=vggt` (`vggt_memory.py`): frozen VGGT-1B aggregator, last-round patch tokens
+(2048-d), plus the same Plucker rays and view embedding as the DINOv2 control. Input
+224x308 (2816 tokens) or `MEMORY_SIZE="378 518"` (7992 tokens). Report with tables,
+plots and conclusions: `vggt_probe_report.ipynb` (`STAGE=report` re-executes it into
+`outputs/geo_probe`).
+
+Results (jobs 12545-12548, analysis 12554):
+
+| | 3DRAE | VGGT 224x308 | VGGT 378x518 | DINOv2 patches |
+|---|---|---|---|---|
+| point prompt: position / azimuth / quadrant | 0.27 m / 8.0 deg / 83.3% | 0.29 m / 7.8 deg / 83.2% | 0.26 m / 7.4 deg / 83.3% | 0.52 m / 10.8 deg / 78.9% |
+| category query: position / azimuth / quadrant | 0.95 m / 42.8 deg / 45.6% | 1.45 m / 56.9 deg / 37.2% | 1.46 m / 57.3 deg / 37.1% | 0.94 m / 34.5 deg / 51.3% |
+| category query: final train loss | 0.15 | 0.49 | 0.45 | 0.09 |
+
+With the object located, VGGT and 3DRAE tokens give the same accuracy. From a category
+name the probe does much worse on VGGT tokens: its layer-1 attention stays near uniform
+(1.0-1.4x on the 7x7 patches around the object, 2.7x only for 200+ train objects; DINOv2
+5-8x) and it does not fit the train set either. One seed; last VGGT round only.
