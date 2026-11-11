@@ -30,20 +30,23 @@ class GeoProbe(nn.Module):
     """Each query reads the tokens on its own: no attention between objects, so
     a position can only come from the tokens and the object's own category."""
 
-    def __init__(self, text_dim: int, token_dim: int, dim: int = 512, layers: int = 2, heads: int = 8):
+    def __init__(self, text_dim: int, token_dim: int, dim: int = 512, layers: int = 2, heads: int = 8,
+                 out_dim: int = 3):
         super().__init__()
         self.query_proj = nn.Linear(text_dim, dim)
         self.memory_proj = nn.Sequential(nn.LayerNorm(token_dim), nn.Linear(token_dim, dim))
         self.layers = nn.ModuleList(ProbeLayer(dim, heads) for _ in range(layers))
-        self.head = nn.Sequential(nn.LayerNorm(dim), nn.Linear(dim, dim), nn.GELU(), nn.Linear(dim, 3))
+        self.head = nn.Sequential(nn.LayerNorm(dim), nn.Linear(dim, dim), nn.GELU(), nn.Linear(dim, out_dim))
 
-    def forward(self, text, tokens, scale):
-        """text (B, O, T), tokens (B, N, D), scale (B) -> positions (B, O, 3), metres."""
+    def forward(self, text, tokens, scale=None):
+        """text (B, O, T), tokens (B, N, D), scale (B) -> positions (B, O, 3), metres.
+        Without scale: the raw head output (B, O, out_dim)."""
         query = self.query_proj(text)
         memory = self.memory_proj(tokens)
         for layer in self.layers:
             query = layer(query, memory)
-        return self.head(query) * scale[:, None, None]
+        out = self.head(query)
+        return out if scale is None else out * scale[:, None, None]
 
     @torch.no_grad()
     def attention_maps(self, text, tokens) -> list:
