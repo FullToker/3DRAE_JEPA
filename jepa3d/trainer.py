@@ -104,7 +104,8 @@ class HardNegTrainer(GVJEPATrainer):
         return loss, infonce.item()
 
     def _log(self, entry: dict, prefix: str) -> None:
-        """This rank's numbers only (rank 0), like the base trainer's train log."""
+        """This rank's numbers only (rank 0), like the base trainer's train log.
+        No key may be a path prefix of another: mlflow's file store keeps one file per metric."""
         if not self.accelerator.is_main_process:
             return
         with open(self.output_dir / "hardneg_log.jsonl", "a") as f:
@@ -134,7 +135,7 @@ class HardNegTrainer(GVJEPATrainer):
                 continue
             for r, hit in zip(rows.tolist(), (logits.argmax(1) == 0).tolist()):
                 hits["val_hard_acc"].append(hit)
-                hits[f"val_hard_acc/{batch['rows'][r].get('question_type')}"].append(hit)
+                hits[f"val_hard_acc_type/{batch['rows'][r].get('question_type')}"].append(hit)
         model.train()
         self._log({"step": self._steps, **{k: sum(v) / len(v) for k, v in sorted(hits.items())}}, "val")
         return sum(losses) / len(losses) if losses else float("nan")
