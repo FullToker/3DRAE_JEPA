@@ -195,3 +195,30 @@ With the object located, VGGT and 3DRAE tokens give the same accuracy. From a ca
 name the probe does much worse on VGGT tokens: its layer-1 attention stays near uniform
 (1.0-1.4x on the 7x7 patches around the object, 2.7x only for 200+ train objects; DINOv2
 5-8x) and it does not fit the train set either. One seed; last VGGT round only.
+
+## Experiment 4: reverse probe, category from a point
+
+`train_reverse.py` (`STAGE=reverse`): classify the category (195 train categories,
+cross-entropy) of each object whose centre is in a view. `READOUT=attention`: the same
+cross-attention probe, query = Fourier features of the centre pixel's Plucker ray only,
+so the category must come from the tokens. `READOUT=index` (DINOv2 / VGGT): MLP on the
+one patch token holding the centre. Report: `reverse_probe_report.ipynb`
+(`STAGE=report NOTEBOOK=reverse_probe_report`).
+
+Results (jobs 12620-12625, val, 4920 objects; always guessing "door" gives 4.5%):
+
+| | top-1 | top-5 | macro top-1 | train top-1 |
+|---|---|---|---|---|
+| 3DRAE, attention | 31.8% [29.1, 34.6] | 58.8% | 16.1% | 86% |
+| DINOv2 patches, attention | 34.5% [31.8, 37.2] | 61.5% | 18.6% | 88% |
+| VGGT, attention | 19.3% | 44.2% | 7.8% | 71% |
+| DINOv2 patches, index | 56.4% | 78.6% | 40.7% | 87% |
+| VGGT, index | 40.2% | 64.8% | 19.2% | 63% |
+| shuffled 3DRAE (floor) | 7.7% | 23.2% | 2.0% | 10% |
+
+3DRAE tokens hold as much location-indexed category information as DINOv2 patches under
+the same readout, far above the floor, but only for frequent categories (top-1 50% for
+200+ train objects, 10% for 10-49, about 0 below 10). All probes overfit heavily (train
+86-88%, val 32-35%): 913 scenes are too few to learn the name-to-feature mapping. Attention
+by ray loses information against indexing the patch (34.5% vs 56.4% on DINOv2). VGGT
+tokens hold clearly less category information.
