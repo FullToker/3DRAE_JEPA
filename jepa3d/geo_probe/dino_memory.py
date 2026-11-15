@@ -10,21 +10,21 @@ from this than from the 1024 neck tokens, the neck loses them.
 import torch
 from torch import nn
 
-from jepa3d.x_encoder import unpack_cams
+from jepa3d.x_encoder import encode_patches, unpack_cams
 from utils import plucker_rays_from_K_w2c
 
 
 def dino_patches(rae, images):
-    """Frozen DINOv2 patch features: images (B, V, 3, H, W) -> (B, V, h, w, C)."""
-    B, V, _, height, width = images.shape
-    patch = rae.encoder.patch_size
+    """Frozen foundation-encoder patch features (DINOv2, or SigLIP2 with the SigLIP2
+    3DRAE config): images (B, V, 3, H, W) -> (B, V, h, w, C), h = H // neck patch."""
+    height, width = images.shape[-2:]
+    patch = rae.neck.patch_size
     h, w = height // patch, width // patch
     with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
-        normalized = (images - rae.image_mean.unsqueeze(1)) / rae.image_std.unsqueeze(1)
-        feats = rae.encoder(normalized.flatten(0, 1)).float()
-    if feats.shape[1] != h * w:
-        raise ValueError(f"expected {h * w} patches per view, got {feats.shape[1]}")
-    return feats.unflatten(0, (B, V)).unflatten(2, (h, w))
+        feats = encode_patches(rae, images).float()
+    if feats.shape[2] != h * w:
+        raise ValueError(f"expected {h * w} patches per view, got {feats.shape[2]}")
+    return feats.unflatten(2, (h, w))
 
 
 class PatchMemory(nn.Module):
@@ -55,4 +55,4 @@ class DinoPatchMemory(PatchMemory):
     def forward(self, rae, images, cams):
         """images (B, V, 3, H, W), cams (B, V, 25) -> tokens (B, V * P, C)."""
         feats = dino_patches(rae, images).flatten(2, 3)                    # (B, V, P, C)
-        return self.embed(feats, cams, *images.shape[-2:], rae.encoder.patch_size)
+        return self.embed(feats, cams, *images.shape[-2:], rae.neck.patch_size)

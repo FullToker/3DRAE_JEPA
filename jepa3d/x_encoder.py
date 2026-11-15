@@ -16,6 +16,7 @@ Output :
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 import yaml
 from torch import nn
 
@@ -29,6 +30,20 @@ CAM_DIM = 25
 def unpack_cams(cams: torch.Tensor):
     """(..., 25) -> K (..., 3, 3), w2c (..., 4, 4)."""
     return cams[..., :9].unflatten(-1, (3, 3)), cams[..., 9:].unflatten(-1, (4, 4))
+
+
+def encode_patches(rae, images: torch.Tensor) -> torch.Tensor:
+    """Frozen foundation-encoder patch features: images (b, n, 3, H, W) in [0, 1]
+    -> (b, n, P, C) on the neck's (H // patch, W // patch) grid. An encoder with
+    another patch size (SigLIP2: 16, neck: 14) gets the image resized so that it
+    yields that grid, as RAE_Latent._encode_siglip2 does."""
+    b, n, _, height, width = images.shape
+    flat = images.flatten(0, 1)
+    grid, patch = rae.neck.patch_size, rae.encoder.patch_size
+    if grid != patch:
+        flat = F.interpolate(flat, size=(height // grid * patch, width // grid * patch),
+                             mode="bicubic", align_corners=False)
+    return rae.encoder((flat - rae.image_mean) / rae.image_std).unflatten(0, (b, n))
 
 
 def view_counts(cams: torch.Tensor) -> torch.Tensor:
@@ -78,8 +93,7 @@ class ThreeDRAEXEncoder(nn.Module):
             [plucker_rays_from_K_w2c(k.float(), e.float(), height, width) for k, e in zip(K, w2c)]
         )
         rae = self.rae
-        normalized = (images - rae.image_mean.unsqueeze(1)) / rae.image_std.unsqueeze(1)
-        feats = rae.encoder(normalized.flatten(0, 1)).unflatten(0, (b, n))   # (b, n, P, C)
+        feats = encode_patches(rae, images)                                  # (b, n, P, C)
         latent = rae.neck(feats, None, rays)
         if rae.do_normalization:
             latent = rae._apply_norm(latent)

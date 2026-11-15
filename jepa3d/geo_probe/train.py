@@ -71,7 +71,7 @@ def point_queries(rae, batch, device):
     valid = prompt[..., 0] >= 0
     view = prompt[..., 0].clamp(min=0).long()
     u, v = prompt[..., 1].clamp(min=0), prompt[..., 2].clamp(min=0)
-    patch = rae.encoder.patch_size
+    patch = rae.neck.patch_size
     h, w = feats.shape[2:4]
     row = (v // patch).long().clamp(max=h - 1)
     col = (u // patch).long().clamp(max=w - 1)
@@ -172,6 +172,8 @@ def main() -> None:
                         help="input size of a dino / vggt memory, multiples of 14 (default 224 308)")
     parser.add_argument("--query", choices=("category", "point"), default="category",
                         help="category: text embedding of the name; point: DINOv2 patch + ray at the projected centre")
+    parser.add_argument("--feature-config", default="configs/models/dino2_feature.yaml",
+                        help="3DRAE feature model (configs/models/siglip2_feature.yaml: SigLIP2 encoder and neck)")
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--lr", type=float, default=3e-4)
@@ -204,7 +206,7 @@ def main() -> None:
     val_loader = DataLoader(val_set, batch_size=args.batch_size, num_workers=args.num_workers, collate_fn=collate,
                             pin_memory=True)
 
-    encoder = ThreeDRAEXEncoder().to(device)
+    encoder = ThreeDRAEXEncoder(args.feature_config).to(device)
     if args.query == "point":
         embeddings = None
         text_dim = encoder.rae.encoder.hidden_size + 6

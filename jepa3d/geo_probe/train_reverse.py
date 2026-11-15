@@ -78,7 +78,7 @@ class Reader:
 
     def __init__(self, args, classes, device):
         self.args, self.device = args, device
-        self.encoder = ThreeDRAEXEncoder().to(device)
+        self.encoder = ThreeDRAEXEncoder(args.feature_config).to(device)
         self.memory = self.backbone = None
         if args.readout == "index":
             if args.memory == "vggt":
@@ -118,7 +118,7 @@ class Reader:
                 feats = feats.unflatten(2, (images.shape[-2] // VGGT_PATCH, images.shape[-1] // VGGT_PATCH))
                 patch = VGGT_PATCH
             else:
-                feats, patch = dino_patches(self.encoder.rae, images), self.encoder.rae.encoder.patch_size
+                feats, patch = dino_patches(self.encoder.rae, images), self.encoder.rae.neck.patch_size
             return self.probe(feats, prompt, patch), prompt[..., 0] >= 0, None
         queries, valid = ray_queries(self.encoder, batch, device)
         tokens = scene_tokens(self.encoder, batch, device, previous, shuffled, self.memory)
@@ -180,6 +180,8 @@ def main() -> None:
     parser.add_argument("--readout", choices=("attention", "index"), default="attention")
     parser.add_argument("--tokens", choices=("real", "shuffled"), default="real",
                         help="shuffled: tokens of another scene, the prior from the ray alone")
+    parser.add_argument("--feature-config", default="configs/models/dino2_feature.yaml",
+                        help="3DRAE feature model (configs/models/siglip2_feature.yaml: SigLIP2 encoder and neck)")
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--lr", type=float, default=3e-4)
