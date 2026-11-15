@@ -146,11 +146,12 @@ def text_sources():
             yield f"mmscan_caption_{split}", dataset, scene, int(r["object_id"]), norm(r["object_type"]), r["caption"]
     for split, rows in load(MMSCAN / "MMScan_samples" / "MMScan_VG.json").items():
         for r in rows:
-            if len(r["target_id"]) != 1:  # multi-target and zero-target rows name no single object
+            targets = r.get("target_id") or []  # the test split carries no targets
+            if len(targets) != 1:  # multi-target and zero-target rows name no single object
                 yield f"mmscan_vg_{split}", r["scan_id"].partition("/")[0], None, None, None, r["text"]
                 continue
             dataset, _, scene = r["scan_id"].partition("/")
-            yield f"mmscan_vg_{split}", dataset, scene, int(r["target_id"][0]), norm(r["target"][0]), r["text"]
+            yield f"mmscan_vg_{split}", dataset, scene, int(targets[0]), norm(r["target"][0]), r["text"]
 
 
 def main() -> None:
