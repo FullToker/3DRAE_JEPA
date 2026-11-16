@@ -14,6 +14,8 @@
 #   SMOKE=1   only the smoke run
 #   PROBE     point probe (default: the centre-prompt probe)
 #   TAG       prefix of the result files (default: centre)
+# Without a free GPU: sbatch --gres=gpu:0 --cpus-per-task=40 <this file> (slow; fine for the
+# training-free runs and the smoke run).
 # Create the log folder once before the first submission:
 #   mkdir -p /glob/g01-cache/pf/Yushuo/3DRAE_JEPA/experiments/slot_vsibench_check/logs
 
@@ -24,6 +26,7 @@ CONTAINER="/glob/g01-cache/pf/Yushuo/container/vjepa21v2.sif"
 EXP="experiments/slot_vsibench_check"
 
 cd "$ROOT"
+export OMP_NUM_THREADS=$((SLURM_CPUS_PER_TASK > 8 ? SLURM_CPUS_PER_TASK - 8 : 1))   # 8 loader workers
 RUN="srun singularity exec --nv --env-file $VJEPA/.env/hf.env --env VJEPA_ROOT=$VJEPA -H $VJEPA:/home/go98qit --bind /glob/g01-cache:/glob/g01-cache $CONTAINER python3"
 PROBE=${PROBE:-outputs/geo_probe/point_3drae_real/final.pt}
 TAG=${TAG:-centre}

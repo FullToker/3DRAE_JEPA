@@ -137,7 +137,7 @@ def main() -> None:
     args = parser.parse_args()
 
     torch.manual_seed(0)
-    device = torch.device("cuda")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")   # cpu: smoke and small runs
     dataset = Questions(args.manifest, args.limit)
     loader = DataLoader(dataset, batch_size=1, num_workers=args.num_workers, collate_fn=first)
     encoder, probe = load_point_probe(args.probe, device)

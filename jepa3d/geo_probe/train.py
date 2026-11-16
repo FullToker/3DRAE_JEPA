@@ -192,7 +192,7 @@ def main() -> None:
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
-    device = torch.device("cuda")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")   # cpu: smoke and small runs
     output = Path(args.output)
     output.mkdir(parents=True, exist_ok=True)
     (output / "args.json").write_text(json.dumps(vars(args), indent=2))

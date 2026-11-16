@@ -178,7 +178,7 @@ def main() -> None:
     args = parser.parse_args()
 
     torch.manual_seed(0)
-    device = torch.device("cuda")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")   # cpu: smoke and small runs
     with open(args.train_labels) as f:
         frequency = Counter(o["category"] for line in f for o in json.loads(line)["objects"])
     dataset = BoxDataset(args.labels, args.stats, limit=args.limit, seeds=list(range(args.seeds)),
