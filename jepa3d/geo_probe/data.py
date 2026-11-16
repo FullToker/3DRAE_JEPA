@@ -142,6 +142,8 @@ class GeoProbeDataset(Dataset):
             "scale": scale,
             # Raw ScanNet world z (up) in the first camera's frame.
             "up": torch.from_numpy(np.linalg.inv(pose_0)[:3, 2].copy()).float(),
+            # First camera's pose in the raw world frame (not collated).
+            "pose_0": pose_0,
         }
 
 

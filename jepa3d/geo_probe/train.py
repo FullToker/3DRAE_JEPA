@@ -172,6 +172,9 @@ def main() -> None:
                         help="input size of a dino / vggt memory, multiples of 14 (default 224 308)")
     parser.add_argument("--query", choices=("category", "point"), default="category",
                         help="category: text embedding of the name; point: DINOv2 patch + ray at the projected centre")
+    parser.add_argument("--box-prompts", type=float, default=0.0, metavar="SHARE",
+                        help="--query point: share of training prompts moved from the projected centre to a "
+                             "random patch inside the object's 3D box")
     parser.add_argument("--feature-config", default="configs/models/dino2_feature.yaml",
                         help="3DRAE feature model (configs/models/siglip2_feature.yaml: SigLIP2 encoder and neck)")
     parser.add_argument("--epochs", type=int, default=100)
@@ -196,8 +199,16 @@ def main() -> None:
 
     if args.memory_size and args.memory == "3drae":
         parser.error("--memory-size needs --memory dino or vggt")
-    train_set = GeoProbeDataset(args.train_labels, args.stats, limit=args.limit,
-                                seeds=[0] if args.fixed_views else None, memory_size=args.memory_size)
+    if args.box_prompts and args.query != "point":
+        parser.error("--box-prompts needs --query point")
+    train_kwargs = {"limit": args.limit, "seeds": [0] if args.fixed_views else None, "memory_size": args.memory_size}
+    if args.box_prompts:
+        from jepa3d.geo_probe.box_prompts import BoxPromptDataset
+        from jepa3d.tools.diagnose_teacher_grounding import load_boxes
+        train_set = BoxPromptDataset(args.train_labels, args.stats, share=args.box_prompts,
+                                     boxes=load_boxes("train"), **train_kwargs)
+    else:
+        train_set = GeoProbeDataset(args.train_labels, args.stats, **train_kwargs)
     val_set = GeoProbeDataset(args.val_labels, args.stats, limit=args.limit, seeds=list(range(args.val_seeds)),
                               memory_size=args.memory_size)
     train_loader = DataLoader(train_set, batch_size=min(args.batch_size, len(train_set)), shuffle=True, drop_last=True,

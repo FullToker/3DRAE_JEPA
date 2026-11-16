@@ -46,7 +46,6 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from jepa3d.frame_pool import sample_views
 from jepa3d.geo_probe.data import IMAGE_SIZE, GeoProbeDataset
 from jepa3d.geo_probe.labels import EXCLUDED, INFOS
 from jepa3d.geo_probe.probe import SceneMetrics
@@ -92,10 +91,8 @@ class BoxDataset(GeoProbeDataset):
 
     def __getitem__(self, idx):
         sample = super().__getitem__(idx)
-        index, seed = self.samples[idx]
-        scene = self.scenes[index]
-        frames = sample_views(scene["pool"], scene["keep"], scene["dist"], self.num_views, f"{scene['scene']}:{seed}")
-        to_camera = np.linalg.inv(scene["axis_align"] @ frames[0].c2w)                 # aligned -> first camera
+        scene = self.scenes[self.samples[idx][0]]
+        to_camera = np.linalg.inv(scene["axis_align"] @ sample["pose_0"])              # aligned -> first camera
         boxes = np.stack([self.boxes[scene["scene"]][o["id"]] for o in scene["objects"]])
         rotation = np.stack([to_camera[:3, :3] @ euler_zxy(b[6:9]) for b in boxes])
         sample["box_center"] = torch.from_numpy(boxes[:, :3] @ to_camera[:3, :3].T + to_camera[:3, 3]).float()
