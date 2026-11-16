@@ -33,7 +33,7 @@ class BoxPromptDataset(BoxDataset):
                                 sample.pop("box_half"), sample.pop("box_rotation")).flatten(1)       # (O, V*h*w)
         h, w = IMAGE_SIZE[0] // PATCH, IMAGE_SIZE[1] // PATCH
         for o in range(len(in_box)):
-            inside = torch.flatnonzero(in_box[o])
+            inside = in_box[o].nonzero().flatten()
             if len(inside) and (sample["prompt"][o, 0] < 0 or random.random() < self.share):
                 view, rest = divmod(int(inside[random.randrange(len(inside))]), h * w)
                 sample["prompt"][o] = torch.tensor([view, (rest % w + random.random()) * PATCH,

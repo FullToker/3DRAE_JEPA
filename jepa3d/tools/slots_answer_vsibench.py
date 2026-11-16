@@ -172,8 +172,8 @@ def main() -> None:
             if kind == "order":
                 presence = z.cpu().numpy()
                 for share in ORDER_SHARES:
-                    first = (presence >= share * presence.max(1, keepdims=True)).argmax(1)
-                    answer = order_answer(row["candidates"], names, first)
+                    first_frame = (presence >= share * presence.max(1, keepdims=True)).argmax(1)
+                    answer = order_answer(row["candidates"], names, first_frame)
                     out[f"order{share}"] = answer
                     for key in keys:
                         metrics.add(row["scene"], f"{key}/order{share}_acc", [answer.lower() == target])
