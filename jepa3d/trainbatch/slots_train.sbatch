@@ -23,6 +23,10 @@
 #   MODE=eval     eval only
 #       sbatch --gres=gpu:1 --cpus-per-task=10 --mem=96G --job-name=slots_eval \
 #           --export=ALL,MODE=eval jepa3d/trainbatch/slots_train.sbatch
+#   MODE=diagnose do the trained slot vectors depend on the positions, does the
+#                 prediction depend on them (jepa3d/tools/diagnose_slot_encoder.py)
+#       sbatch --gres=gpu:1 --cpus-per-task=10 --mem=96G --job-name=slots_diagnose \
+#           --export=ALL,MODE=diagnose jepa3d/trainbatch/slots_train.sbatch
 #
 # Eval (jepa3d/tools/eval_holdout.py): holdout multiple choice in long and
 # short answer format plus VSI-Bench test / debiased, each with real, shuffled
@@ -95,6 +99,11 @@ train)
 eval)
     CHECKPOINT=${CHECKPOINT:-$EXP/ckpt/final.pt}
     run_eval "$CHECKPOINT" "$EXP/results/eval_$(basename "$CHECKPOINT" .pt).json"
+    ;;
+diagnose)
+    CHECKPOINT=${CHECKPOINT:-$EXP/ckpt/final.pt}
+    $SIF python3 jepa3d/tools/diagnose_slot_encoder.py --config "$CONFIG" --checkpoint "$CHECKPOINT" \
+        --manifest "$EXP/data/holdout_f8.jsonl" --output "$EXP/results/diagnose_slot_encoder.json"
     ;;
 *)
     echo "unknown MODE=$MODE" >&2
