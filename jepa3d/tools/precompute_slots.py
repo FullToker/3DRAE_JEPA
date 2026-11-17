@@ -123,7 +123,8 @@ def main() -> None:
     teacher, tokenizer = load_dinotxt(device)
     with open(args.train_labels) as f:
         vocabulary = {o["category"] for line in f for o in json.loads(line)["objects"]}
-    vocabulary = sorted(vocabulary | EXCLUDED | set(names))
+    # Tagged names outside the vocabulary (NameFinder's last-word fallback) need a text embedding too.
+    vocabulary = sorted(vocabulary | EXCLUDED | set(names) | set().union(*dataset.names))
     index = {name: i for i, name in enumerate(vocabulary)}
     text = embed_vocabulary(teacher, tokenizer, vocabulary, device)["patch", "ensemble"]
     del tokenizer
