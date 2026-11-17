@@ -28,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import torch
 import torch.nn.functional as F
 
+from jepa3d.paths import expand_paths  # noqa: F401  (sets sys.path for fusion_gv)
 from fusion_gv.infer_gvjepa import _load_checkpoint
 from jepa3d.data import build_loader
 from jepa3d.model import build_model_from_config
