@@ -43,7 +43,7 @@ SLOT_MODES = ("slots_swapped", "slots_none", "all_shuffled")
 
 
 def modes_of(model) -> tuple:
-    return MODES + (SLOT_MODES if model.slot_encoder is not None else ())
+    return MODES + (SLOT_MODES if model.uses_slots else ())
 
 
 def set_mode(model, mode: str) -> None:
@@ -68,7 +68,7 @@ def slots_of(model, batch):
         return None
     if model._slot_mode in ("slots_swapped", "all_shuffled"):
         shift = max(1, len(slots["row"]) // 2)
-        slots = {**slots, "pos": slots["pos"].roll(shift, 0), "conf": slots["conf"].roll(shift, 0)}
+        slots = {**slots, **{k: slots[k].roll(shift, 0) for k in ("pos", "conf", "patch", "scale") if k in slots}}
     return slots
 
 

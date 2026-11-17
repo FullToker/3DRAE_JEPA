@@ -23,7 +23,8 @@ set -euo pipefail
 ROOT="/glob/g01-cache/pf/Yushuo/3DRAE_JEPA"
 VJEPA="/glob/g01-cache/pf/Yushuo/vjepa201"
 CONTAINER="/glob/g01-cache/pf/Yushuo/container/vjepa21v2.sif"
-EXP="experiments/slots_v1"
+NAME=${NAME:-slots_v1}   # slots_v1 | slots_v2 (give sbatch --output and --error in its logs folder)
+EXP="experiments/$NAME"
 SRC="experiments/hardneg_v1/data"
 PART=${PART:-smoke}
 

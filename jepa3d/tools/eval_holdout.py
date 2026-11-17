@@ -50,13 +50,16 @@ def candidates_of(row: dict) -> dict:
     return out
 
 
-def holdout_accuracy(model, loader, device) -> dict:
+def holdout_accuracy(model, loader, device, slot_log=None) -> dict:
+    """slot_log: a list that receives (acc, error_m) of the object tokens of every batch that has them."""
     stats = defaultdict(lambda: [0, 0, 0.0])   # correct, rows, sum of 1 / candidates
     for batch in loader:
         images = batch["images_vggt"].to(device, non_blocking=True)
         cams = batch["images_jepa"].to(device, non_blocking=True)
         with torch.autocast("cuda", dtype=torch.bfloat16):
             pred = model.predict_embedding(images, cams, batch["query"], slots=slots_of(model, batch))
+        if slot_log is not None and getattr(model, "slot_metrics", None):
+            slot_log.append((float(model.slot_metrics["acc"]), float(model.slot_metrics["error_m"])))
         per_row = [candidates_of(row) for row in batch["rows"]]
         for fmt in ("long", "short"):
             cands = [c[fmt][0] if fmt in c else [] for c in per_row]
@@ -98,7 +101,11 @@ def main() -> None:
         set_mode(model, mode)
         with torch.no_grad():
             loader = build_loader([args.holdout], cfg, args.batch_size, train=False, limit=args.limit)
-            res = {"holdout": holdout_accuracy(model, loader, device)}
+            slot_log = []
+            res = {"holdout": holdout_accuracy(model, loader, device, slot_log)}
+            if slot_log:   # object tokens: does the output at the token find the position (mean over batches)
+                res["object_tokens"] = {"acc": sum(a for a, _ in slot_log) / len(slot_log),
+                                        "error_m": sum(e for _, e in slot_log) / len(slot_log)}
             for path in args.eval:
                 loader = build_loader([path], cfg, args.batch_size, train=False, limit=args.limit)
                 res[Path(path).stem] = accuracy(model, loader, device)

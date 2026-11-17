@@ -150,8 +150,9 @@ def main() -> None:
             scale = torch.tensor([sample["scale"]], device=device)
             position = probe(queries, tokens, scale)[0].view(len(rows), k, 3).cpu().numpy()
             confidence = z.gather(1, chosen).cpu().numpy()
+            patches = chosen.cpu().tolist()
             slots[sample["group"]] = {name: ([[round(float(x), 3) for x in p] for p in position[i]],
-                                             [round(float(c), 2) for c in confidence[i]])
+                                             [round(float(c), 2) for c in confidence[i]], patches[i])
                                       for i, name in enumerate(sample["names"])}
             if step % 2000 == 0:
                 print(f"[groups] {step}/{len(dataset)}", flush=True)
@@ -165,8 +166,8 @@ def main() -> None:
             group = dataset.group_of[i]
             if group not in mine:
                 continue
-            row["slots"] = [{"name": name, "spans": spans, "pos": slots[group][name][0], "conf": slots[group][name][1]}
-                            for name, spans in dataset.found[i]]
+            row["slots"] = [{"name": name, "spans": spans, "pos": slots[group][name][0], "conf": slots[group][name][1],
+                             "patch": slots[group][name][2]} for name, spans in dataset.found[i]]
             f.write(json.dumps(row) + "\n")
             written += 1
             with_slots += bool(row["slots"])

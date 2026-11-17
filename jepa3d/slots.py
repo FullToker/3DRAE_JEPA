@@ -2,11 +2,15 @@
 
 A slot belongs to one object name of the question:
     {"name": "trash bin", "spans": [[start, end], ...],      characters of the name in the query
-     "pos": [[x, y, z], ...], "conf": [c, ...]}              k candidates, best first
+     "pos": [[x, y, z], ...], "conf": [c, ...],              k candidates, best first
+     "patch": [p, ...]}                                      their patches, flat index over (view, row, column)
 pos is in the frame of the first view, in metres; conf is dino.txt's
 standardized score of the candidate's patch. jepa3d/tools/precompute_slots.py
-writes them into the manifest rows ("slots"); SlotEncoder turns them into one
-vector per name, which ThreeDRAEJEPA adds to the name's query tokens.
+writes them into the manifest rows ("slots"). ThreeDRAEJEPA uses them in one of two ways:
+  slots_v1  SlotEncoder turns pos and conf into one vector per name, added to the name's query tokens;
+  slots_v2  ObjectTokens gives every name a token of its own, built from what the candidates' patches
+            show (frozen patch feature + pixel ray, no position), and asks the predictor's output at that
+            token for the position.
 
 Names are found with a vocabulary (build_vocabulary) because the questions are
 paraphrased: SPAR tags its objects as "<name> (Object0)", every other question
@@ -18,6 +22,7 @@ import re
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from jepa3d.vsi_text import NON_OBJECTS, count_categories
 
@@ -111,10 +116,72 @@ class SlotEncoder(nn.Module):
         return self.out((self.weight(x).softmax(-2) * x).sum(-2))
 
 
+class ObjectTokens(nn.Module):
+    """One token per object name, and the loss on the predictor's output at that token.
+
+    Input: for each of a name's K candidates the frozen patch feature and the
+    Plucker ray of the patch centre (jepa3d.geo_probe.train.point_queries) with
+    dino.txt's confidence; the K embeddings are averaged with learned weights.
+    The token has the size of an ordinary query token (LayerNorm, then
+    gain / sqrt(dim)) and carries a type embedding. It does not contain the
+    position.
+
+    Loss: the output at the token must pick the position of the name's best
+    candidate among the positions of all names of the batch (InfoNCE; positions
+    divided by the scene scale, as the cameras the scene tokens were built
+    with). The position is not in the input: it has to be read from the scene
+    tokens along the token's rays. A linear head on the detached output reports
+    the error in metres.
+    """
+
+    def __init__(self, dim: int, query_dim: int, hidden: int = 512, embed: int = 256, bands: int = 8,
+                 temperature: float = 0.07):
+        super().__init__()
+        self.bands, self.temperature = bands, temperature
+        self.embed = nn.Sequential(nn.LayerNorm(query_dim + 1), nn.Linear(query_dim + 1, hidden), nn.GELU(),
+                                   nn.Linear(hidden, hidden), nn.GELU())
+        self.weight = nn.Linear(hidden, 1)
+        self.out = nn.Sequential(nn.Linear(hidden, dim), nn.LayerNorm(dim))
+        self.gain = nn.Parameter(torch.ones(()))
+        self.type_embed = nn.Parameter(torch.randn(dim) * 0.02)
+        self.read = nn.Sequential(nn.Linear(dim, hidden), nn.GELU(), nn.Linear(hidden, embed))
+        self.position = nn.Sequential(nn.Linear(3 * 2 * bands + 3, hidden), nn.GELU(), nn.Linear(hidden, embed))
+        self.metres = nn.Linear(dim, 3)
+
+    def forward(self, queries: torch.Tensor, conf: torch.Tensor) -> torch.Tensor:
+        """queries (N, K, C + 6), conf (N, K) -> tokens (N, dim)."""
+        x = self.embed(torch.cat([queries, conf[..., None] / 4], dim=-1))
+        x = self.out((self.weight(x).softmax(-2) * x).sum(-2))
+        return x * self.gain / x.shape[-1] ** 0.5 + self.type_embed
+
+    def loss(self, hidden: torch.Tensor, pos: torch.Tensor, scale: torch.Tensor) -> dict:
+        """hidden (N, dim) predictor output at the tokens, pos (N, 3) metres, scale (N,) ->
+        {"loss", "acc" (share of names whose own position scores highest), "error_m" (median), "regression"}."""
+        hidden = hidden.float()
+        target = pos / scale[:, None]
+        t = F.normalize(self.position(torch.cat([fourier(4 * target, self.bands), target], dim=-1)), dim=-1)
+        logits = F.normalize(self.read(hidden), dim=-1) @ t.T / self.temperature
+        same = (torch.cdist(target, target) < 0.02) & ~torch.eye(len(target), dtype=torch.bool, device=pos.device)
+        logits = logits.masked_fill(same, float("-inf"))   # the same object in another row is not a negative
+        labels = torch.arange(len(target), device=pos.device)
+        guess = self.metres(hidden.detach())
+        return {"loss": F.cross_entropy(logits, labels), "acc": (logits.argmax(1) == labels).float().mean(),
+                "regression": F.smooth_l1_loss(guess, target),
+                "error_m": ((guess - target).norm(dim=-1) * scale).median().detach()}
+
+
+def scene_scale(c2w) -> float:
+    """Largest camera distance from the first view (metres): jepa3d.data.normalize_cameras divides by it."""
+    c2w = torch.tensor(c2w, dtype=torch.float64)
+    scale = float((torch.linalg.inv(c2w[0]) @ c2w)[:, :3, 3].norm(dim=-1).max())
+    return scale if scale > 1e-6 else 1.0
+
+
 def collate_slots(rows, drop: bool = False):
     """Rows' "slots" -> None if the batch has none, else
-    {"pos" (N, K, 3), "conf" (N, K), "row" (N,) batch index, "spans" list of N span lists}."""
-    pos, conf, owner, spans = [], [], [], []
+    {"pos" (N, K, 3), "conf" (N, K), "row" (N,) batch index, "spans" list of N span lists,
+     "scale" (N,) scene scale, "patch" (N, K) if the manifest has it}."""
+    pos, conf, owner, spans, scale, patch = [], [], [], [], [], []
     for i, row in enumerate(rows):
         for slot in ([] if drop else row.get("slots") or []):
             k = min(len(slot["pos"]), NUM_CANDIDATES)
@@ -123,7 +190,13 @@ def collate_slots(rows, drop: bool = False):
             conf.append(slot["conf"][:k] + [slot["conf"][0]] * pad)
             owner.append(i)
             spans.append(slot["spans"])
+            scale.append(scene_scale(row["c2w"]) if "c2w" in row else 1.0)
+            if "patch" in slot:
+                patch.append(slot["patch"][:k] + [slot["patch"][0]] * pad)
     if not pos:
         return None
-    return {"pos": torch.tensor(pos, dtype=torch.float32), "conf": torch.tensor(conf, dtype=torch.float32),
-            "row": torch.tensor(owner), "spans": spans}
+    out = {"pos": torch.tensor(pos, dtype=torch.float32), "conf": torch.tensor(conf, dtype=torch.float32),
+           "row": torch.tensor(owner), "spans": spans, "scale": torch.tensor(scale, dtype=torch.float32)}
+    if len(patch) == len(pos):
+        out["patch"] = torch.tensor(patch)
+    return out

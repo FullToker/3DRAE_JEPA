@@ -1,6 +1,6 @@
 """GVJEPATrainer plus a hard-negative term.
 
-    loss = InfoNCE (unchanged) + hard_weight * hard
+    loss = InfoNCE (unchanged) + hard_weight * hard [+ slot_weight * slot + slot regression]
 
 hard: for each row that carries "negatives" (same question, wrong answer; see
 jepa3d/hard_negatives.py), cross-entropy of the prediction against
@@ -11,6 +11,11 @@ Per log_every steps this trainer appends to <output_dir>/hardneg_log.jsonl:
 hard_loss, hard_acc (share of rows whose target beats all its negatives) and
 hard_rows (share of rows that have negatives); each validation adds the same
 on the val manifest, by question type.
+
+slot (models with object tokens, jepa3d.slots.ObjectTokens): the model's own
+loss on the output at the object tokens; slot_loss, slot_acc and slot_error_m
+go to the same log. The regression term only trains the head that reports
+metres (it sees a detached output).
 """
 
 import json
@@ -44,9 +49,11 @@ def hard_logits(pred, target, neg, owner, slot, temperature: float):
 
 
 class HardNegTrainer(GVJEPATrainer):
-    def __init__(self, *args, hard_weight: float = 1.0, **kwargs):
+    def __init__(self, *args, hard_weight: float = 1.0, slot_weight: float = 1.0, **kwargs):
         super().__init__(*args, **kwargs)
         self.hard_weight = hard_weight
+        self.slot_weight = slot_weight
+        self._slot = None   # the model's slot terms of the last forward
         self._steps = 0
         self._sums = defaultdict(float)
 
@@ -59,6 +66,7 @@ class HardNegTrainer(GVJEPATrainer):
         flat = [n for ns in negatives for n in ns]
         out = model(images, cams, batch["query"], batch["target"] + flat, slots=batch.get("slots"))
         B = len(negatives)
+        self._slot = {k[5:]: v for k, v in out.items() if k.startswith("slot_")} or None
         pred, target = out["pred"], out["target"][:B]
         if not flat:
             return pred, target, None, None
@@ -87,7 +95,12 @@ class HardNegTrainer(GVJEPATrainer):
                     batch.get("group_id"), device, batch_size=B, rank=dist.get_rank(), force=True))
                 pred, target = gather_with_grad(pred.float()), gather_with_grad(target.float())
             infonce = bidirectional_infonce(pred, target, temperature=self.temperature, group_ids=group_ids)
-            loss = (infonce * world + self.hard_weight * hard) / self.grad_accum_steps
+            loss = infonce * world + self.hard_weight * hard
+            if self._slot is not None:
+                loss = loss + self.slot_weight * self._slot["loss"] + self._slot["regression"]
+                for key in ("loss", "acc", "error_m"):
+                    self._sums[f"slot_{key}"] += float(self._slot[key])
+            loss = loss / self.grad_accum_steps
 
         rows = 0 if logits is None else len(logits)
         self._sums["hard_loss"] += hard.item() * rows
@@ -99,7 +112,8 @@ class HardNegTrainer(GVJEPATrainer):
             n = max(self._sums["hard_rows"], 1)
             self._log({"step": self._steps, "hard_loss": self._sums["hard_loss"] / n,
                        "hard_acc": self._sums["hard_acc"] / n,
-                       "hard_rows": self._sums["hard_rows"] / self._sums["rows"]}, "train")
+                       "hard_rows": self._sums["hard_rows"] / self._sums["rows"],
+                       **{k: v / self.log_every for k, v in self._sums.items() if k.startswith("slot_")}}, "train")
             self._sums.clear()
         return loss, infonce.item()
 
@@ -131,6 +145,9 @@ class HardNegTrainer(GVJEPATrainer):
                 losses.append(bidirectional_infonce(
                     pred, target, temperature=self.temperature,
                     group_ids=group_ids_tensor(batch.get("group_id"), device)).item())
+            if self._slot is not None:
+                for key in ("acc", "error_m"):
+                    hits[f"val_slot_{key}"].append(float(self._slot[key]))
             if logits is None:
                 continue
             for r, hit in zip(rows.tolist(), (logits.argmax(1) == 0).tolist()):

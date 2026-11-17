@@ -42,8 +42,9 @@ OVERFIT_STEPS=${OVERFIT_STEPS:-200}
 ROOT="/glob/g01-cache/pf/Yushuo/3DRAE_JEPA"
 VJEPA="/glob/g01-cache/pf/Yushuo/vjepa201"
 CONTAINER="/glob/g01-cache/pf/Yushuo/container/vjepa21v2.sif"
-EXP="experiments/slots_v1"
-CONFIG="jepa3d/configs/slots_v1.yaml"
+NAME=${NAME:-slots_v1}   # slots_v1 | slots_v2 (give sbatch --output and --error in its logs folder)
+EXP="experiments/$NAME"
+CONFIG="jepa3d/configs/$NAME.yaml"
 
 cd "$ROOT"
 mkdir -p "$EXP/logs" "$EXP/results"

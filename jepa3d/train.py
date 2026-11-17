@@ -120,7 +120,8 @@ def main() -> None:
             mlflow_logger.log_artifact(config_copy)
         # data.num_negatives > 0: InfoNCE + train.hard_weight * hard-negative term
         if cfg["data"].get("num_negatives", 0):
-            trainer_cls, extra = HardNegTrainer, {"hard_weight": tcfg.get("hard_weight", 1.0)}
+            trainer_cls, extra = HardNegTrainer, {"hard_weight": tcfg.get("hard_weight", 1.0),
+                                                 "slot_weight": tcfg.get("slot_weight", 1.0)}
         else:
             trainer_cls, extra = GVJEPATrainer, {}
         trainer_cls(

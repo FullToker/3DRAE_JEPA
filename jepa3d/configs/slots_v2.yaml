@@ -1,0 +1,112 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# slots_v2: hardneg_v1 + one object token per object name of the question
+# ──────────────────────────────────────────────────────────────────────────────
+#
+# Why: slots_v1 added a vector made of the object's 3D position to the name's
+# query tokens. The trained vector was 99.7% a constant 20 times longer than a
+# token; the predictor only used whether it was there (real slots = slots of
+# another question). Related work (SR-3D region tokens, CVP target-affinity
+# token) gives the object a token of its own that holds visual features, and
+# puts a contrastive loss on the output at that token.
+#
+# Change (jepa3d/slots.py ObjectTokens, jepa3d/model.py):
+#   - every object name gets its own token, placed at the name (same rotary
+#     position as the name's last token), of the size of a query token;
+#   - its content is what dino.txt's candidate patches show: the frozen DINOv2
+#     patch feature and the pixel ray of each of the 4 candidates, with
+#     dino.txt's confidence. The 3D position is NOT in the input;
+#   - the predictor's output at the token must pick the candidate's 3D position
+#     among the positions of all names in the batch (InfoNCE, weight
+#     train.slot_weight). The position has to come from the scene tokens.
+# Data, loss and schedule are otherwise those of hardneg_v1 / slots_v1; the
+# manifests are slots_v1's with each candidate's patch index added.
+#
+# Everything of this experiment lives in experiments/slots_v2/ on the server:
+#   data/ (manifests with slots)  ckpt/  results/  logs/  notebooks/
+#
+# Run: NAME=slots_v2 with jepa3d/trainbatch/slots_data.sbatch, then slots_train.sbatch
+# ──────────────────────────────────────────────────────────────────────────────
+
+init_vljepa_ckpt: ${VJEPA_ROOT}/ckpts/open_vljepa/best.pt
+
+rae:
+  feature_config: configs/models/dino2_feature.yaml   # relative to this repo
+  max_views: 32
+
+fusion:
+  x_encoder_type: 3drae
+  x_encoder_output_dim: 768
+
+slots:
+  enabled: true
+  mode: tokens   # add (slots_v1) | tokens
+  hidden: 512
+
+model:
+  query_model_name: meta-llama/Llama-3.2-1B
+  predictor_llama_layers: 8
+  max_query_tokens: 256
+  y_encoder_name: google/embeddinggemma-300m
+  max_target_tokens: 256
+  shared_embed_dim: 1536
+  y_encoder_lr_multiplier: 0.05
+  hf_cache_dir: ${VJEPA_ROOT}/ckpts
+
+data:
+  train_manifests:
+    - ${RAE_ROOT}/experiments/slots_v2/data/train_f8.jsonl
+  val_manifests:
+    - ${RAE_ROOT}/experiments/slots_v2/data/holdout_f8.jsonl   # shuffled, all rows have negatives
+  mask_key: answer_key   # InfoNCE: equal answer_key pairs are masked
+  num_negatives: 3       # wrong answers per row in training (4-way choice); validation scores all
+  image_size: [224, 308]    # (H, W), multiple of 14, ScanNet aspect, as 3DRAE's ScanNet examples
+  num_workers: 8
+  val_num_workers: 2
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 2
+
+train:
+  seed: 42
+  device: cuda
+  precision: bf16
+  output_dir: ${RAE_ROOT}/experiments/slots_v2/ckpt
+
+  batch_size: 32
+  gradient_accumulation_steps: 4
+  # effective batch = 32 * 4 * 3 GPUs = 384. max_steps counts per-rank
+  # micro-batches: 6870 * 32 * 3 = 660k samples = about 1 epoch of train_f8.jsonl
+  # (658,518 rows)
+  # = 1717 optimizer updates.
+  max_steps: 6870
+  hard_weight: 1.0
+  slot_weight: 1.0   # InfoNCE on the output at the object tokens
+
+  clip_grad_norm: 1.0
+  log_every: 50
+  save_every: 0      # final.pt only (~11 GB)
+  val_every: 500
+  val_max_batches: 60   # 1920 holdout rows
+  val_batch_size: 32
+
+  learning_rate: 1.0e-4
+  min_lr: 1.0e-5
+  warmup_steps: 200   # optimizer updates
+  weight_decay: 0.01
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-8
+  scheduler: cosine
+  temperature: 0.07
+
+mlflow:
+  enabled: true
+  env_file: ${VJEPA_ROOT}/.env/mlflow.env
+  tracking_uri: "file:///glob/g01-cache/pf/Yushuo/mlruns"
+  experiment_name: vljepa_sft_from_ckpt
+  run_name: slots_v2
+  log_params: true
+  tags:
+    project: vljepa-3drae
+    variant: A-3drae-dino2-1024
+    data: vsi590k-spar-f8-hardneg-slots-patch
