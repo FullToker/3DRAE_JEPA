@@ -1,0 +1,104 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# slots_v1: hardneg_v1 + object slots on the question's object names
+# ──────────────────────────────────────────────────────────────────────────────
+#
+# Why: hardneg_v1 is close to chance on the spatial question types, while the
+# answers computed from object-slot positions alone reach 65-78% on VSI-Bench
+# direction questions (experiments/dinotxt_slots). The model lacks "which
+# object is where".
+#
+# Change: every object name of the question carries 4 candidate 3D positions
+# with dino.txt's confidence, found without training (dino.txt patch -> point
+# probe on the frozen 3DRAE tokens; jepa3d/tools/precompute_slots.py). A
+# SlotEncoder (the only new parameters) turns them into one vector per name,
+# added to the name's query tokens (jepa3d/model.py, jepa3d/slots.py).
+# Data, loss and schedule are those of hardneg_v1; the manifests are the same
+# rows with a "slots" field.
+#
+# Everything of this experiment lives in experiments/slots_v1/ on the server:
+#   data/ (manifests with slots)  ckpt/  results/  logs/  notebooks/
+#
+# Run: jepa3d/trainbatch/slots_data.sbatch, then jepa3d/trainbatch/slots_train.sbatch
+# ──────────────────────────────────────────────────────────────────────────────
+
+init_vljepa_ckpt: ${VJEPA_ROOT}/ckpts/open_vljepa/best.pt
+
+rae:
+  feature_config: configs/models/dino2_feature.yaml   # relative to this repo
+  max_views: 32
+
+fusion:
+  x_encoder_type: 3drae
+  x_encoder_output_dim: 768
+
+slots:
+  enabled: true
+  hidden: 512
+
+model:
+  query_model_name: meta-llama/Llama-3.2-1B
+  predictor_llama_layers: 8
+  max_query_tokens: 256
+  y_encoder_name: google/embeddinggemma-300m
+  max_target_tokens: 256
+  shared_embed_dim: 1536
+  y_encoder_lr_multiplier: 0.05
+  hf_cache_dir: ${VJEPA_ROOT}/ckpts
+
+data:
+  train_manifests:
+    - ${RAE_ROOT}/experiments/slots_v1/data/train_f8.jsonl
+  val_manifests:
+    - ${RAE_ROOT}/experiments/slots_v1/data/holdout_f8.jsonl   # shuffled, all rows have negatives
+  mask_key: answer_key   # InfoNCE: equal answer_key pairs are masked
+  num_negatives: 3       # wrong answers per row in training (4-way choice); validation scores all
+  image_size: [224, 308]    # (H, W), multiple of 14, ScanNet aspect, as 3DRAE's ScanNet examples
+  num_workers: 8
+  val_num_workers: 2
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 2
+
+train:
+  seed: 42
+  device: cuda
+  precision: bf16
+  output_dir: ${RAE_ROOT}/experiments/slots_v1/ckpt
+
+  batch_size: 32
+  gradient_accumulation_steps: 4
+  # effective batch = 32 * 4 * 3 GPUs = 384. max_steps counts per-rank
+  # micro-batches: 6870 * 32 * 3 = 660k samples = about 1 epoch of train_f8.jsonl
+  # (658,518 rows)
+  # = 1717 optimizer updates.
+  max_steps: 6870
+  hard_weight: 1.0
+
+  clip_grad_norm: 1.0
+  log_every: 50
+  save_every: 0      # final.pt only (~11 GB)
+  val_every: 500
+  val_max_batches: 60   # 1920 holdout rows
+  val_batch_size: 32
+
+  learning_rate: 1.0e-4
+  min_lr: 1.0e-5
+  warmup_steps: 200   # optimizer updates
+  weight_decay: 0.01
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-8
+  scheduler: cosine
+  temperature: 0.07
+
+mlflow:
+  enabled: true
+  env_file: ${VJEPA_ROOT}/.env/mlflow.env
+  tracking_uri: "file:///glob/g01-cache/pf/Yushuo/mlruns"
+  experiment_name: vljepa_sft_from_ckpt
+  run_name: slots_v1
+  log_params: true
+  tags:
+    project: vljepa-3drae
+    variant: A-3drae-dino2-1024
+    data: vsi590k-spar-f8-hardneg-slots

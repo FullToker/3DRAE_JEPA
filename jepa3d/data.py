@@ -22,6 +22,7 @@ from torch.utils.data import ConcatDataset, DataLoader, Subset
 
 from jepa3d.paths import expand_paths  # noqa: F401  (sets sys.path for fusion_gv)
 from fusion_gv.gvjepa_trainer import GVJEPADataset
+from jepa3d.slots import collate_slots
 from jepa3d.x_encoder import CAM_DIM
 from utils.camera import resize_intrinsics
 
@@ -106,6 +107,8 @@ def spar3d_collate(batch: List[Dict[str, Any]], image_size=(224, 308)) -> Dict[s
         "group_id": [s["group_id"] for s in batch],
         "negatives": [s["negatives"] for s in batch],
         "rows": [s["row"] for s in batch],
+        # object slots of the questions (jepa3d/slots.py); None when the manifest has none
+        "slots": collate_slots([s["row"] for s in batch]),
     }
 
 

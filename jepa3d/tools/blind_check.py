@@ -35,21 +35,41 @@ from jepa3d.model import build_model_from_config
 from jepa3d.train import load_config
 
 MODES = ("real", "shuffled", "zero")
+# Only for models with object slots (jepa3d/slots.py). The three modes above keep the real slots.
+#   slots_swapped  real scene tokens; every name gets the candidates of a slot half a batch away
+#   slots_none     real scene tokens; no slots
+#   all_shuffled   shuffled scene tokens and swapped slots: nothing of the row's own images is left
+SLOT_MODES = ("slots_swapped", "slots_none", "all_shuffled")
+
+
+def modes_of(model) -> tuple:
+    return MODES + (SLOT_MODES if model.slot_encoder is not None else ())
 
 
 def set_mode(model, mode: str) -> None:
-    """Replace the X-encoder's tokens on this model instance."""
+    """Replace the X-encoder's tokens, or the slots, on this model instance."""
     original = type(model)._pool_visual
 
     def pool(images, cams, batch_size):
         tokens, frames = original(model, images, cams, batch_size)
-        if mode == "shuffled":
+        if mode in ("shuffled", "all_shuffled"):
             tokens = tokens.roll(1, 0)
         elif mode == "zero":
             tokens = torch.zeros_like(tokens)
         return tokens, tokens.unsqueeze(1)
 
     model._pool_visual = pool
+    model._slot_mode = mode
+
+
+def slots_of(model, batch):
+    slots = batch.get("slots")
+    if slots is None or model._slot_mode == "slots_none":
+        return None
+    if model._slot_mode in ("slots_swapped", "all_shuffled"):
+        shift = max(1, len(slots["row"]) // 2)
+        slots = {**slots, "pos": slots["pos"].roll(shift, 0), "conf": slots["conf"].roll(shift, 0)}
+    return slots
 
 
 def val_loss(model, loader, device, temperature: float) -> dict:
@@ -61,7 +81,7 @@ def val_loss(model, loader, device, temperature: float) -> dict:
         images = batch["images_vggt"].to(device, non_blocking=True)
         cams = batch["images_jepa"].to(device, non_blocking=True)
         with torch.autocast("cuda", dtype=torch.bfloat16):
-            out = model(images, cams, batch["query"], batch["target"])
+            out = model(images, cams, batch["query"], batch["target"], slots=slots_of(model, batch))
         pred = F.normalize(out["pred"].float(), dim=-1)
         target = F.normalize(out["target"].float(), dim=-1)
         logits = pred @ target.T / temperature
@@ -85,7 +105,7 @@ def accuracy(model, loader, device) -> dict:
         images = batch["images_vggt"].to(device, non_blocking=True)
         cams = batch["images_jepa"].to(device, non_blocking=True)
         with torch.autocast("cuda", dtype=torch.bfloat16):
-            pred = model.predict_embedding(images, cams, batch["query"])
+            pred = model.predict_embedding(images, cams, batch["query"], slots=slots_of(model, batch))
         candidates = [_candidates(row) for row in batch["rows"]]
         scores = _score_candidate_batch(model, pred, candidates, device, include_scores=False)
         for row, cands, score in zip(batch["rows"], candidates, scores):
@@ -128,7 +148,7 @@ def main() -> None:
 
     results = {"checkpoint": args.checkpoint, "step": step, "val_rows": args.val_rows}
     temperature = cfg["train"].get("temperature", 0.07)
-    for mode in MODES:
+    for mode in modes_of(model):
         set_mode(model, mode)
         with torch.no_grad():
             res = {"val_infonce": val_loss(model, build_loader([str(sample)], cfg, args.batch_size, train=False),

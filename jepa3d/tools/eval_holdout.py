@@ -10,7 +10,9 @@ in two answer formats:
 and with three visual inputs (jepa3d/tools/blind_check.py): "real", "shuffled"
 (each query sees another row's scene) and "zero". The gap real - shuffled is
 what the images contribute; "chance" is the mean of 1 / candidates.
---eval manifests (VSI-Bench) are scored as in blind_check.py.
+--eval manifests (VSI-Bench) are scored as in blind_check.py. A model with
+object slots is also scored with swapped slots, without slots and with
+nothing of the row's own images (blind_check.SLOT_MODES).
 
 Usage (from the repo root):
     python jepa3d/tools/eval_holdout.py --config <yaml> --checkpoint <pt> \
@@ -33,7 +35,7 @@ from jepa3d.paths import expand_paths  # noqa: F401  (sets sys.path for fusion_g
 from fusion_gv.infer_gvjepa import _load_checkpoint, _score_candidate_batch
 from jepa3d.data import build_loader
 from jepa3d.model import build_model_from_config
-from jepa3d.tools.blind_check import MODES, accuracy, set_mode
+from jepa3d.tools.blind_check import accuracy, modes_of, set_mode, slots_of
 from jepa3d.train import load_config
 
 
@@ -54,7 +56,7 @@ def holdout_accuracy(model, loader, device) -> dict:
         images = batch["images_vggt"].to(device, non_blocking=True)
         cams = batch["images_jepa"].to(device, non_blocking=True)
         with torch.autocast("cuda", dtype=torch.bfloat16):
-            pred = model.predict_embedding(images, cams, batch["query"])
+            pred = model.predict_embedding(images, cams, batch["query"], slots=slots_of(model, batch))
         per_row = [candidates_of(row) for row in batch["rows"]]
         for fmt in ("long", "short"):
             cands = [c[fmt][0] if fmt in c else [] for c in per_row]
@@ -92,7 +94,7 @@ def main() -> None:
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     results = {"checkpoint": args.checkpoint, "step": step, "holdout": args.holdout}
-    for mode in MODES:
+    for mode in modes_of(model):
         set_mode(model, mode)
         with torch.no_grad():
             loader = build_loader([args.holdout], cfg, args.batch_size, train=False, limit=args.limit)

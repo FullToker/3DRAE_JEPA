@@ -57,7 +57,7 @@ class HardNegTrainer(GVJEPATrainer):
         cams = batch["images_jepa"].to(device, non_blocking=True)
         negatives = batch["negatives"]
         flat = [n for ns in negatives for n in ns]
-        out = model(images, cams, batch["query"], batch["target"] + flat)
+        out = model(images, cams, batch["query"], batch["target"] + flat, slots=batch.get("slots"))
         B = len(negatives)
         pred, target = out["pred"], out["target"][:B]
         if not flat:
