@@ -55,22 +55,27 @@ class ThreeDRAEJEPA(FusionGVJEPA):
             self.slot_encoder = SlotEncoder(self.vis_proj.out_features, slot_cfg.get("hidden", 512))
             self.query_in_proj.register_forward_hook(self._add_slots)
 
-    def _add_slots(self, _module, _inputs, q_emb):
-        """Forward hook on query_in_proj: q_emb (B, L, h) plus each slot's vector on its name's tokens."""
-        if self._pending is None or self._pending[1] is None:
-            return None
-        queries, slots = self._pending
+    def name_tokens(self, queries, slots) -> torch.Tensor:
+        """(N, L) bool: the query tokens (as the predictor tokenizes them) that spell each slot's name."""
         offsets = self.query_tokenizer(queries, max_length=self.config.max_query_tokens, padding=True,
                                        truncation=True, return_offsets_mapping=True,
                                        return_tensors="pt")["offset_mapping"]
-        assert offsets.shape[:2] == q_emb.shape[:2]
         start, end = offsets[slots["row"].cpu()].unbind(-1)                 # (N, L) characters of each token
         on_name = torch.zeros_like(start, dtype=torch.bool)
         for n, spans in enumerate(slots["spans"]):
             for a, b in spans:
                 on_name[n] |= (start[n] < b) & (end[n] > a)
+        return on_name
+
+    def _add_slots(self, _module, _inputs, q_emb):
+        """Forward hook on query_in_proj: q_emb (B, L, h) plus each slot's vector on its name's tokens."""
+        if self._pending is None or self._pending[1] is None:
+            return None
+        queries, slots = self._pending
+        on_name = self.name_tokens(queries, slots).to(q_emb.device)
+        assert on_name.shape[1] == q_emb.shape[1]
         vectors = self.slot_encoder(slots["pos"].to(q_emb.device), slots["conf"].to(q_emb.device))   # (N, h)
-        add = on_name.to(q_emb.device)[..., None] * vectors[:, None].to(q_emb.dtype)
+        add = on_name[..., None] * vectors[:, None].to(q_emb.dtype)
         return q_emb.index_add(0, slots["row"].to(q_emb.device), add)
 
     def forward(self, images, cams, queries, targets=None, mode: str = "infonce", slots=None):
