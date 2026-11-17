@@ -7,18 +7,20 @@ are those after each predictor layer; "input" is what enters the first layer):
   attention   share of the attention of the question tokens that lands on the scene
               tokens and of the scene tokens that lands on the question, next to the
               share an even spread would give (only if the layers return weights).
-  knockout    attention from question to scene tokens (q>s), or from scene to
-              question tokens (s>q), is blocked in one layer or in all: how far the
-              prediction moves (cosine distance) and the multiple-choice accuracy.
+  knockout    attention from question to scene tokens (q>s), from scene to question
+              tokens (s>q), or from question to object tokens (q>o, models with object
+              tokens) is blocked in one layer or in all: how far the prediction moves
+              (cosine distance) and the multiple-choice accuracy.
   scene       the scene tokens of another row: how much the hidden states of the
               question tokens change in each layer (relative L2).
-  slots       (models with a slot encoder) the slots shifted by 2 m, or taken from
-              other names: change of the name tokens, the other question tokens and
-              the scene tokens in each layer.
+  slots       (models with slots) the slots taken from other names, and with a slot
+              encoder also shifted by 2 m: change of the name tokens, the other
+              question tokens and the scene tokens in each layer.
   readback    the position of each name's best slot candidate, read from the mean
               hidden state of the name's tokens in each layer and from the mean of
-              the scene tokens (ridge regression on half of the names, median error
-              on the other half; "mean" always answers the mean position).
+              the scene tokens, with object tokens also from the name's object token
+              (ridge regression on half of the names, median error on the other half;
+              "mean" always answers the mean position).
               Without slot injection this asks whether the model located the
               object on its own.
 
@@ -57,6 +59,7 @@ class Tap:
         self.record = False
         self.attention = False   # also record attention shares
         self.scene = 0           # number of scene tokens of the forward in progress
+        self.query = 0           # number of question tokens (object tokens follow them)
         for i, layer in enumerate(self.layers):
             layer.register_forward_pre_hook(lambda _m, args, kwargs, i=i: self._enter(i, args, kwargs), with_kwargs=True)
             layer.register_forward_hook(lambda _m, _a, out: self._leave(out))
@@ -78,9 +81,11 @@ class Tap:
             self.hidden.append(args[0].float())
         if i in self.block:
             mask = mask.clone()
-            s, low = self.scene, torch.finfo(mask.dtype).min
+            s, q, low = self.scene, self.scene + self.query, torch.finfo(mask.dtype).min
             if self.block[i] == "q>s":
                 mask[:, :, s:, :s] = low
+            elif self.block[i] == "q>o":
+                mask[:, :, s:q, q:] = low
             else:
                 mask[:, :, :s, s:] = low
             return args, {**kwargs, "attention_mask": mask}
@@ -139,7 +144,8 @@ def main() -> None:
     model.to(device).eval()
     tap = Tap(model)
     depth = len(tap.layers)
-    injects = model.slot_encoder is not None
+    injects = model.uses_slots
+    directions = ("q>s", "s>q", "q>o") if model.object_tokens is not None else ("q>s", "s>q")
 
     cached = {}
     original = type(model)._pool_visual
@@ -162,13 +168,14 @@ def main() -> None:
         return F.normalize(pred.float(), dim=-1), tap.hidden
 
     knockouts = {"none": {}}
-    for direction in ("q>s", "s>q"):
+    for direction in directions:
         knockouts[f"{direction} all"] = {i: direction for i in range(depth)}
         for i in range(depth):
             knockouts[f"{direction} layer {i + 1}"] = {i: direction}
     moved, correct = defaultdict(list), defaultdict(list)
     change = defaultdict(lambda: [[] for _ in range(depth + 1)])
-    name_states, scene_states, positions = [[] for _ in range(depth + 1)], [[] for _ in range(depth + 1)], []
+    name_states, scene_states, object_states, positions = ([[] for _ in range(depth + 1)] for _ in range(3)), []
+    name_states, scene_states, object_states = name_states
     relative = lambda a, b, keep: float(((a - b).norm(dim=-1)[keep] / b.norm(dim=-1)[keep].clamp_min(1e-6)).mean())
 
     loader = build_loader([args.manifest], cfg, args.batch_size, train=False)
@@ -177,20 +184,27 @@ def main() -> None:
         if slots is None:
             continue
         cached.pop("tokens", None)
+        on_name = model.name_tokens(batch["query"], slots).to(device)       # (N, L)
+        tap.query = L = on_name.shape[1]
         if number < args.attention_batches:
             tap.eager(True)
         base, hidden = run(batch, slots, record=True)
         if tap.attention:
             tap.eager(False)
         s = tap.scene
-        valid = tap.valid[:, s:]                                             # (B, L) real question tokens
-        on_name = model.name_tokens(batch["query"], slots).to(device)       # (N, L)
+        q = slice(s, s + L)
+        valid = tap.valid[:, q]                                              # (B, L) real question tokens
         rows = slots["row"].to(device)
+        column = torch.zeros_like(rows)                                      # as ThreeDRAEJEPA._append_tokens
+        for n in range(1, len(rows)):
+            column[n] = column[n - 1] + 1 if rows[n] == rows[n - 1] else 0
         in_name = torch.zeros(valid.shape, device=device).index_add(0, rows, on_name.float()).bool() & valid
         other = valid & ~in_name
         weight = on_name.float() / on_name.sum(1, keepdim=True).clamp_min(1)
         for depth_index, h in enumerate(hidden):
-            name_states[depth_index].append(torch.einsum("nl,nlh->nh", weight, h[rows, s:]).cpu())
+            name_states[depth_index].append(torch.einsum("nl,nlh->nh", weight, h[rows, q]).cpu())
+            if model.object_tokens is not None:
+                object_states[depth_index].append(h[rows, s + L + column].cpu())
             scene_states[depth_index].append(h[rows, :s].mean(1).cpu())
         positions.append(slots["pos"][:, 0])
 
@@ -215,20 +229,21 @@ def main() -> None:
         moved["scene of another row"] += (1 - (pred * base).sum(-1)).tolist()
         score(pred, "scene of another row")
         for depth_index, (a, b) in enumerate(zip(states, hidden)):
-            change["scene of another row: question tokens"][depth_index].append(relative(a[:, s:], b[:, s:], valid))
+            change["scene of another row: question tokens"][depth_index].append(relative(a[:, q], b[:, q], valid))
         if injects:
             shift = F.normalize(torch.randn(len(rows), 1, 3, generator=torch.Generator().manual_seed(number)), dim=-1)
             half = max(1, len(rows) // 2)
-            variants = {"slots shifted 2 m": {**slots, "pos": slots["pos"] + 2 * shift},
-                        "slots of other names": {**slots, "pos": slots["pos"].roll(half, 0),
-                                                 "conf": slots["conf"].roll(half, 0)}}
+            variants = {"slots of other names": {**slots, **{k: slots[k].roll(half, 0)
+                                                             for k in ("pos", "conf", "patch") if k in slots}}}
+            if model.slot_encoder is not None:
+                variants["slots shifted 2 m"] = {**slots, "pos": slots["pos"] + 2 * shift}
             for key, variant in variants.items():
                 pred, states = run(batch, variant, record=True)
                 moved[key] += (1 - (pred * base).sum(-1)).tolist()
                 score(pred, key)
                 for depth_index, (a, b) in enumerate(zip(states, hidden)):
                     for part, keep in (("name tokens", in_name), ("other question tokens", other)):
-                        change[f"{key}: {part}"][depth_index].append(relative(a[:, s:], b[:, s:], keep))
+                        change[f"{key}: {part}"][depth_index].append(relative(a[:, q], b[:, q], keep))
                     change[f"{key}: scene tokens"][depth_index].append(
                         relative(a[:, :s], b[:, :s], torch.ones_like(a[:, :s, 0], dtype=torch.bool)))
 
@@ -245,6 +260,8 @@ def main() -> None:
     result["readback"] = {"names": len(target), "mean": float((target - target.mean(0)).norm(dim=-1).median()),
                           "name_tokens": [readback(torch.cat(x).to(device), target) for x in name_states],
                           "scene_tokens": [readback(torch.cat(x).to(device), target) for x in scene_states]}
+    if model.object_tokens is not None:
+        result["readback"]["object_tokens"] = [readback(torch.cat(x).to(device), target) for x in object_states]
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(result, indent=1))
