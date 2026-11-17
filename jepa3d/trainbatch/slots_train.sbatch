@@ -16,6 +16,8 @@
 #                 script on 64 rows (plumbing only); the checkpoint is deleted.
 #       sbatch --gres=gpu:1 --cpus-per-task=10 --mem=96G --job-name=slots_overfit \
 #           --export=ALL,MODE=overfit jepa3d/trainbatch/slots_train.sbatch
+#                 TRAIN_MANIFEST=<jsonl> takes the batch from another manifest
+#                 (e.g. the holdout, before the training manifest exists).
 #   MODE=train    (default) 3-GPU training, then eval of ckpt/final.pt
 #       sbatch jepa3d/trainbatch/slots_train.sbatch
 #   MODE=eval     eval only
@@ -41,7 +43,7 @@ CONFIG="jepa3d/configs/slots_v1.yaml"
 
 cd "$ROOT"
 mkdir -p "$EXP/logs" "$EXP/results"
-if [ ! -f "$EXP/data/train_f8.jsonl" ]; then   # shards of slots_data.sbatch -> one manifest
+if [ ! -f "$EXP/data/train_f8.jsonl" ] && [ "$MODE" = train ]; then   # shards of slots_data.sbatch -> one manifest
     cat "$EXP"/data/train_f8.jsonl.part[0-9] > "$EXP/data/train_f8.jsonl.tmp"
     mv "$EXP/data/train_f8.jsonl.tmp" "$EXP/data/train_f8.jsonl"
     rm "$EXP"/data/train_f8.jsonl.part[0-9]
@@ -78,7 +80,8 @@ run_eval() {   # <checkpoint> <output json> [extra eval_holdout.py args]
 case "$MODE" in
 overfit)
     $SIF accelerate launch --num_processes 1 jepa3d/train.py --config "$CONFIG" \
-        --overfit --overfit-steps "$OVERFIT_STEPS" --output-dir "$EXP/ckpt_overfit"
+        --overfit --overfit-steps "$OVERFIT_STEPS" --output-dir "$EXP/ckpt_overfit" \
+        ${TRAIN_MANIFEST:+--train-manifest "$TRAIN_MANIFEST"}
     run_eval "$EXP/ckpt_overfit/final.pt" "$EXP/results/eval_overfit_plumbing.json" --limit 64
     rm "$EXP/ckpt_overfit/final.pt"
     tail -n 3 "$EXP/ckpt_overfit/train_log.jsonl" "$EXP/ckpt_overfit/hardneg_log.jsonl"

@@ -60,12 +60,15 @@ def main() -> None:
                         help="repeat one batch (train.batch_size samples) for --overfit-steps steps")
     parser.add_argument("--overfit-steps", type=int, default=200)
     parser.add_argument("--output-dir")
+    parser.add_argument("--train-manifest", nargs="+", help="replaces data.train_manifests (smoke runs)")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
     tcfg = cfg["train"]
     if args.output_dir:
         tcfg["output_dir"] = args.output_dir
+    if args.train_manifest:
+        cfg["data"]["train_manifests"] = args.train_manifest
 
     precision = tcfg.get("precision", "bf16")
     accelerator = Accelerator(
