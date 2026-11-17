@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Does the slot injection reach the prediction, and on the right tokens?
 
-On a few rows of a manifest with slots (untrained model, as built from the config):
+On a few rows of a manifest with slots (the model as training starts with it):
   - prints each slot's name next to the query tokens its vector is added to;
   - gives the slot encoder's zero output layer random weights and reports how
     far the predicted embedding moves with slots, with swapped slots and with
@@ -37,7 +37,11 @@ def main() -> None:
     cfg = load_config(args.config)
     cfg["data"]["val_num_workers"] = 2
     device = torch.device("cuda")
-    model = build_model_from_config(cfg).to(device).eval()
+    model = build_model_from_config(cfg)
+    if cfg.get("init_vljepa_ckpt"):   # as jepa3d/train.py
+        from fusion_gv.load_vljepa_init import load_predictor_and_y_encoder_from_vljepa
+        load_predictor_and_y_encoder_from_vljepa(model, cfg["init_vljepa_ckpt"], load_vis_proj=False)
+    model = model.to(device).eval()
     batch = next(iter(build_loader([args.manifest], cfg, args.rows, train=False)))
     slots, queries = batch["slots"], batch["query"]
     images, cams = batch["images_vggt"].to(device), batch["images_jepa"].to(device)
@@ -54,11 +58,11 @@ def main() -> None:
             return F.normalize(model.predict_embedding(images, cams, queries, slots=s).float(), dim=-1)
 
     def moved(s):
-        return [round(x, 4) for x in (1 - (predict(s) * base).sum(-1)).tolist()]
+        return [float(f'{x:.2e}') for x in (1 - (predict(s) * base).sum(-1)).tolist()]
 
     base = predict(None)
     print("distance between the predictions of row 0 and the other rows:",
-          [round(x, 4) for x in (1 - base @ base[0]).tolist()])
+          [float(f'{x:.2e}') for x in (1 - base @ base[0]).tolist()])
     seen = []
     handle = model.query_in_proj.register_forward_hook(
         lambda _m, inputs, out: seen.append((float(inputs[0].float().norm(dim=-1).mean()),
@@ -75,7 +79,7 @@ def main() -> None:
     handle.remove()
     print("swapped slots:                ", moved(swapped))
     print("one name of row 0 moved 2 m, distance to the prediction with the real slots:",
-          [round(x, 4) for x in (1 - (predict(one) * predict(slots)).sum(-1)).tolist()])
+          [float(f'{x:.2e}') for x in (1 - (predict(one) * predict(slots)).sum(-1)).tolist()])
 
 
 if __name__ == "__main__":
