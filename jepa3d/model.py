@@ -52,7 +52,7 @@ class ThreeDRAEJEPA(FusionGVJEPA):
         self._pending = None   # (queries, slots) of the forward in progress
         self.slot_encoder = None
         if (slot_cfg or {}).get("enabled"):
-            self.slot_encoder = SlotEncoder(self.query_in_proj.out_features, slot_cfg.get("hidden", 512))
+            self.slot_encoder = SlotEncoder(self.vis_proj.out_features, slot_cfg.get("hidden", 512))
             self.query_in_proj.register_forward_hook(self._add_slots)
 
     def _add_slots(self, _module, _inputs, q_emb):
