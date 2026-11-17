@@ -57,13 +57,22 @@ def main() -> None:
         return [round(x, 4) for x in (1 - (predict(s) * base).sum(-1)).tolist()]
 
     base = predict(None)
+    print("distance between the predictions of row 0 and the other rows:",
+          [round(x, 4) for x in (1 - base @ base[0]).tolist()])
+    seen = []
+    handle = model.query_in_proj.register_forward_hook(
+        lambda _m, inputs, out: seen.append((float(inputs[0].float().norm(dim=-1).mean()),
+                                             float((out - inputs[0]).float().norm(dim=-1).max()))))
     print("zero output layer, with slots:", moved(slots))
     torch.manual_seed(0)
     torch.nn.init.normal_(model.slot_encoder.out.weight, std=0.02)
     swapped = {**slots, "pos": slots["pos"].roll(len(slots["row"]) // 2, 0)}
     one = {**slots, "pos": slots["pos"].clone()}
     one["pos"][0] += 2.0   # the first name of row 0, two metres away
+    seen.clear()
     print("with slots:                   ", moved(slots))
+    print("query token norm (mean), largest added slot vector norm:", seen)
+    handle.remove()
     print("swapped slots:                ", moved(swapped))
     print("one name of row 0 moved 2 m, distance to the prediction with the real slots:",
           [round(x, 4) for x in (1 - (predict(one) * predict(slots)).sum(-1)).tolist()])
