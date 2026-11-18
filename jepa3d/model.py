@@ -39,7 +39,7 @@ import fusion_gv.gvjepa as gvjepa
 from fusion_gv.gvjepa import FusionGVJEPA
 from fusion_gv.gvjepa_trainer import build_model_from_config as _build_fusion_gv_model
 from jepa3d.slots import ObjectTokens, SlotEncoder
-from jepa3d.x_encoder import ThreeDRAEXEncoder, encode_patches, unpack_cams
+from jepa3d.x_encoder import ThreeDRAEXEncoder, encode_patches, unpack_cams, view_counts
 
 
 class ThreeDRAEJEPA(FusionGVJEPA):
@@ -110,6 +110,8 @@ class ThreeDRAEJEPA(FusionGVJEPA):
         size = self.x_encoder.rae.neck.patch_size
         h, w = images.shape[-2] // size, images.shape[-1] // size
         view, rest = patch // (h * w), patch % (h * w)
+        # slots taken from another row (a control) may name a view this row does not have
+        view = view % view_counts(cams)[rows][:, None]
         with torch.no_grad():
             feats = encode_patches(self.x_encoder.rae, images).float()        # (B, V, P, C)
             feature = F.layer_norm(feats[rows[:, None], view, rest], feats.shape[-1:])
