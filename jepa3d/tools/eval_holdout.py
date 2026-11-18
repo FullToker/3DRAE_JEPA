@@ -79,7 +79,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--config", required=True)
     parser.add_argument("--checkpoint", required=True)
-    parser.add_argument("--holdout", required=True)
+    parser.add_argument("--holdout", help="omit to score only the --eval manifests")
     parser.add_argument("--eval", nargs="*", default=[])
     parser.add_argument("--output", required=True)
     parser.add_argument("--batch-size", type=int, default=32)
@@ -100,9 +100,10 @@ def main() -> None:
     for mode in modes_of(model):
         set_mode(model, mode)
         with torch.no_grad():
-            loader = build_loader([args.holdout], cfg, args.batch_size, train=False, limit=args.limit)
-            slot_log = []
-            res = {"holdout": holdout_accuracy(model, loader, device, slot_log)}
+            slot_log, res = [], {}
+            if args.holdout:
+                loader = build_loader([args.holdout], cfg, args.batch_size, train=False, limit=args.limit)
+                res["holdout"] = holdout_accuracy(model, loader, device, slot_log)
             if slot_log:   # object tokens: does the output at the token find the position (mean over batches)
                 res["object_tokens"] = {"acc": sum(a for a, _ in slot_log) / len(slot_log),
                                         "error_m": sum(e for _, e in slot_log) / len(slot_log)}
