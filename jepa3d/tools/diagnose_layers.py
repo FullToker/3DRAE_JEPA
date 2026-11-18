@@ -174,8 +174,8 @@ def main() -> None:
             knockouts[f"{direction} layer {i + 1}"] = {i: direction}
     moved, correct = defaultdict(list), defaultdict(list)
     change = defaultdict(lambda: [[] for _ in range(depth + 1)])
-    name_states, scene_states, object_states, positions = ([[] for _ in range(depth + 1)] for _ in range(3)), []
-    name_states, scene_states, object_states = name_states
+    name_states, scene_states, object_states = ([[] for _ in range(depth + 1)] for _ in range(3))
+    positions = []
     relative = lambda a, b, keep: float(((a - b).norm(dim=-1)[keep] / b.norm(dim=-1)[keep].clamp_min(1e-6)).mean())
 
     loader = build_loader([args.manifest], cfg, args.batch_size, train=False)
