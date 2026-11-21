@@ -45,14 +45,16 @@ CONTAINER="/glob/g01-cache/pf/Yushuo/container/vjepa21v2.sif"
 NAME=${NAME:-slots_v1}   # slots_v1 | slots_v2 (give sbatch --output and --error in its logs folder)
 EXP="experiments/$NAME"
 CONFIG="jepa3d/configs/$NAME.yaml"
+DATA=${DATA:-$EXP/data}   # manifests with slots; an experiment that reuses another one's passes DATA=experiments/<other>/data
+# NUMERIC="<jsonl> ..." WEIGHTS=<json of jepa3d/balance.py>: numeric questions for models with a numeric head
 
 cd "$ROOT"
 mkdir -p "$EXP/logs" "$EXP/results"
-if [ ! -f "$EXP/data/train_f8.jsonl" ] && [ "$MODE" = train ]; then   # shards of slots_data.sbatch -> one manifest
-    cat "$EXP"/data/train_f8.jsonl.part[0-9] > "$EXP/data/train_f8.jsonl.tmp"
-    mv "$EXP/data/train_f8.jsonl.tmp" "$EXP/data/train_f8.jsonl"
-    rm "$EXP"/data/train_f8.jsonl.part[0-9]
-    wc -l "$EXP/data/train_f8.jsonl"
+if [ ! -f "$DATA/train_f8.jsonl" ] && [ "$MODE" = train ]; then   # shards of slots_data.sbatch -> one manifest
+    cat "$DATA"/train_f8.jsonl.part[0-9] > "$DATA/train_f8.jsonl.tmp"
+    mv "$DATA/train_f8.jsonl.tmp" "$DATA/train_f8.jsonl"
+    rm "$DATA"/train_f8.jsonl.part[0-9]
+    wc -l "$DATA/train_f8.jsonl"
 fi
 MONITOR_LOG="$EXP/logs/gpu_monitor_${SLURM_JOB_ID}.log"
 nvidia-smi dmon -s pucvmet -d 30 > "$MONITOR_LOG" 2>&1 &
@@ -77,8 +79,9 @@ run_eval() {   # <checkpoint> <output json> [extra eval_holdout.py args]
     shift 2
     echo "[eval $ckpt] start $(date)"
     $SIF python3 jepa3d/tools/eval_holdout.py --config "$CONFIG" --checkpoint "$ckpt" \
-        --holdout "$EXP/data/holdout_f8.jsonl" \
-        --eval "$EXP/data/vsibench_test_posed_f8.jsonl" "$EXP/data/vsibench_debiased_posed_f8.jsonl" \
+        --holdout "$DATA/holdout_f8.jsonl" \
+        --eval "$DATA/vsibench_test_posed_f8.jsonl" "$DATA/vsibench_debiased_posed_f8.jsonl" \
+        ${NUMERIC:+--numeric $NUMERIC} ${WEIGHTS:+--answer-weights "$WEIGHTS"} \
         --output "$out" "$@"
 }
 

@@ -1,0 +1,116 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# balnum_v1: slots_v2 + inverse answer-frequency weights + numeric head
+# ──────────────────────────────────────────────────────────────────────────────
+#
+# Why: without the images the models still score far above chance (holdout:
+# chance 29.9, zero scene tokens ~44). Part of that is the answer distribution
+# ("2" is half of all counts, left / right are 3/4 of the directions). And
+# numeric answers are only matched as text, where 2.4 is as wrong as 9.0.
+#
+# Change (everything else is slots_v2, same manifests):
+#   - data.answer_weights: every training row is weighted with the inverse
+#     frequency of its answer class within its question type (jepa3d/balance.py;
+#     clipped at 5, mean 1 per type) in InfoNCE, the hard-negative term and the
+#     numeric term;
+#   - numeric_head: a head on the pooled predictor output regresses log(answer)
+#     for counts, distances, sizes and areas (train.numeric_weight). At
+#     evaluation it answers VSI-Bench's numeric questions (mean relative accuracy).
+#
+# Everything of this experiment lives in experiments/balnum_v1/ on the server:
+#   data/ (weight table, numeric VSI-Bench manifests)  ckpt/  results/  logs/  notebooks/
+#
+# Run: jepa3d/trainbatch/balnum_data.sbatch, then slots_train.sbatch with
+#   NAME=balnum_v1 DATA=experiments/slots_v2/data
+#   NUMERIC="experiments/balnum_v1/data/vsibench_test_numeric_posed_f8.jsonl experiments/balnum_v1/data/vsibench_debiased_numeric_posed_f8.jsonl"
+#   WEIGHTS=experiments/balnum_v1/data/answer_weights.json
+# ──────────────────────────────────────────────────────────────────────────────
+
+init_vljepa_ckpt: ${VJEPA_ROOT}/ckpts/open_vljepa/best.pt
+
+rae:
+  feature_config: configs/models/dino2_feature.yaml   # relative to this repo
+  max_views: 32
+
+fusion:
+  x_encoder_type: 3drae
+  x_encoder_output_dim: 768
+
+slots:
+  enabled: true
+  mode: tokens   # add (slots_v1) | tokens
+  hidden: 512
+
+numeric_head:
+  enabled: true
+  hidden: 512
+
+model:
+  query_model_name: meta-llama/Llama-3.2-1B
+  predictor_llama_layers: 8
+  max_query_tokens: 256
+  y_encoder_name: google/embeddinggemma-300m
+  max_target_tokens: 256
+  shared_embed_dim: 1536
+  y_encoder_lr_multiplier: 0.05
+  hf_cache_dir: ${VJEPA_ROOT}/ckpts
+
+data:
+  train_manifests:
+    - ${RAE_ROOT}/experiments/slots_v2/data/train_f8.jsonl
+  val_manifests:
+    - ${RAE_ROOT}/experiments/slots_v2/data/holdout_f8.jsonl   # shuffled, all rows have negatives
+  answer_weights: ${RAE_ROOT}/experiments/balnum_v1/data/answer_weights.json   # jepa3d/balance.py
+  mask_key: answer_key   # InfoNCE: equal answer_key pairs are masked
+  num_negatives: 3       # wrong answers per row in training (4-way choice); validation scores all
+  image_size: [224, 308]    # (H, W), multiple of 14, ScanNet aspect, as 3DRAE's ScanNet examples
+  num_workers: 8
+  val_num_workers: 2
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 2
+
+train:
+  seed: 42
+  device: cuda
+  precision: bf16
+  output_dir: ${RAE_ROOT}/experiments/balnum_v1/ckpt
+
+  batch_size: 32
+  gradient_accumulation_steps: 4
+  # effective batch = 32 * 4 * 3 GPUs = 384. max_steps counts per-rank
+  # micro-batches: 6870 * 32 * 3 = 660k samples = about 1 epoch of train_f8.jsonl
+  # (658,518 rows)
+  # = 1717 optimizer updates.
+  max_steps: 6870
+  hard_weight: 1.0
+  slot_weight: 1.0   # InfoNCE on the output at the object tokens
+  numeric_weight: 1.0   # smooth L1 on log(answer) of the numeric rows
+
+  clip_grad_norm: 1.0
+  log_every: 50
+  save_every: 0      # final.pt only (~11 GB)
+  val_every: 500
+  val_max_batches: 60   # 1920 holdout rows
+  val_batch_size: 32
+
+  learning_rate: 1.0e-4
+  min_lr: 1.0e-5
+  warmup_steps: 200   # optimizer updates
+  weight_decay: 0.01
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-8
+  scheduler: cosine
+  temperature: 0.07
+
+mlflow:
+  enabled: true
+  env_file: ${VJEPA_ROOT}/.env/mlflow.env
+  tracking_uri: "file:///glob/g01-cache/pf/Yushuo/mlruns"
+  experiment_name: vljepa_sft_from_ckpt
+  run_name: balnum_v1
+  log_params: true
+  tags:
+    project: vljepa-3drae
+    variant: A-3drae-dino2-1024
+    data: vsi590k-spar-f8-hardneg-slots-patch

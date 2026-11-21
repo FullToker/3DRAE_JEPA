@@ -22,10 +22,18 @@ before pooling. forward() returns the loss on the output at these tokens
 ("slot_loss", "slot_regression") with "slot_acc" and "slot_error_m";
 predict_embedding() leaves them in self.slot_metrics.
 
+With "numeric_head: {enabled: true}" a small head on the pooled predictor
+output (the input of pred_proj) gives one number per kind of numeric answer
+(jepa3d.balance.KINDS), as log values: forward() returns it as "numeric"
+(B, kinds), predict_embedding() leaves it in self.numeric_output. Which rows
+and which kind it is read for is the caller's choice (the row's question
+type); a model without the head has no such parameters.
+
 Config (YAML) layout matches fusion_gv's, with
     fusion:  x_encoder_type: 3drae, x_encoder_output_dim: 768
     rae:     feature_config, max_views
     slots:   enabled, hidden, mode (add | tokens)
+    numeric_head: enabled, hidden
 """
 
 from functools import partial
@@ -38,12 +46,14 @@ from jepa3d.paths import expand_paths  # noqa: F401  (sets sys.path for fusion_g
 import fusion_gv.gvjepa as gvjepa
 from fusion_gv.gvjepa import FusionGVJEPA
 from fusion_gv.gvjepa_trainer import build_model_from_config as _build_fusion_gv_model
+from jepa3d.balance import KINDS
 from jepa3d.slots import ObjectTokens, SlotEncoder
 from jepa3d.x_encoder import ThreeDRAEXEncoder, encode_patches, unpack_cams, view_counts
 
 
 class ThreeDRAEJEPA(FusionGVJEPA):
-    def __init__(self, config, rae_cfg: dict | None = None, slot_cfg: dict | None = None):
+    def __init__(self, config, rae_cfg: dict | None = None, slot_cfg: dict | None = None,
+                 numeric_cfg: dict | None = None):
         rae_cfg = rae_cfg or {}
         x_encoder = ThreeDRAEXEncoder(
             feature_config=rae_cfg.get("feature_config", "configs/models/dino2_feature.yaml"),
@@ -73,6 +83,19 @@ class ThreeDRAEJEPA(FusionGVJEPA):
         elif slot_cfg.get("enabled"):
             self.slot_encoder = SlotEncoder(self.vis_proj.out_features, slot_cfg.get("hidden", 512))
             self.query_in_proj.register_forward_hook(self._add_slots)
+
+        self.numeric_head = None
+        self.numeric_output = None
+        self._pooled = None
+        if (numeric_cfg or {}).get("enabled"):
+            hidden = numeric_cfg.get("hidden", 512)
+            self.numeric_head = torch.nn.Sequential(
+                torch.nn.LayerNorm(self.pred_proj.in_features), torch.nn.Linear(self.pred_proj.in_features, hidden),
+                torch.nn.GELU(), torch.nn.Linear(hidden, len(KINDS)))
+            self.pred_proj.register_forward_pre_hook(lambda _m, args: setattr(self, "_pooled", args[0]))
+
+    def _numeric(self):
+        return self.numeric_head(self._pooled.float())
 
     @property
     def uses_slots(self) -> bool:
@@ -179,6 +202,8 @@ class ThreeDRAEJEPA(FusionGVJEPA):
             out = super().forward(images, cams, queries, targets, mode)
             if self.object_tokens is not None:
                 out.update({f"slot_{k}": v for k, v in self._slot_loss(slots).items()})
+            if self.numeric_head is not None:
+                out["numeric"] = self._numeric()
             return out
         finally:
             self._pending = None
@@ -189,6 +214,8 @@ class ThreeDRAEJEPA(FusionGVJEPA):
             pred = super().predict_embedding(images, cams, queries)
             if self.object_tokens is not None:
                 self.slot_metrics = None if self._token_outputs is None else self._slot_loss(slots)
+            if self.numeric_head is not None:
+                self.numeric_output = self._numeric()
             return pred
         finally:
             self._pending = None
@@ -208,6 +235,7 @@ class ThreeDRAEJEPA(FusionGVJEPA):
 def build_model_from_config(cfg: dict) -> ThreeDRAEJEPA:
     """fusion_gv's config -> GVJEPAConfig mapping, instantiating ThreeDRAEJEPA."""
     cfg = {**cfg, "fusion": {"jepa_ckpt": None, **cfg["fusion"]}}
-    factory = partial(ThreeDRAEJEPA, rae_cfg=cfg.get("rae"), slot_cfg=cfg.get("slots"))
+    factory = partial(ThreeDRAEJEPA, rae_cfg=cfg.get("rae"), slot_cfg=cfg.get("slots"),
+                      numeric_cfg=cfg.get("numeric_head"))
     with mock.patch.object(gvjepa, "FusionGVJEPA", factory):
         return _build_fusion_gv_model(cfg)

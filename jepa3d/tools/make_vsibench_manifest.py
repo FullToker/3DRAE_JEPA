@@ -51,6 +51,9 @@ def main():
     parser.add_argument("--output", required=True)
     parser.add_argument("--stats", nargs="+", required=True)
     parser.add_argument("--num-views", type=int, default=8)
+    parser.add_argument("--numeric", action="store_true",
+                        help="keep the numeric questions instead of the multiple-choice ones: target = the "
+                             "ground-truth number (scored with a numeric head, jepa3d/tools/eval_holdout.py)")
     parser.add_argument("--min-valid-frac", type=float, default=0.5)
     parser.add_argument("--min-median-depth", type=float, default=0.6)
     parser.add_argument("--min-rel-sharpness", type=float, default=0.3)
@@ -66,14 +69,15 @@ def main():
             if r["dataset"] not in ("scannet", "scannetpp"):
                 counts[f"skip_{r['dataset']}"] += 1
                 continue
-            if not r.get("options"):
-                counts["skip_numeric"] += 1
+            has_options = r.get("options") is not None and len(r["options"]) > 0
+            if has_options == args.numeric:
+                counts["skip_multiple_choice" if args.numeric else "skip_numeric"] += 1
                 continue
             options = {}
-            for opt in r["options"]:
+            for opt in r["options"] if has_options else []:
                 m = PREFIX.match(opt)
                 options[m.group(1) if m else opt] = PREFIX.sub("", opt).strip()
-            if r["ground_truth"] not in options:
+            if not args.numeric and r["ground_truth"] not in options:
                 counts["bad_ground_truth"] += 1
                 continue
             key = (r["dataset"], r["scene_name"])
@@ -96,7 +100,7 @@ def main():
                 "id": int(r["id"]),
                 "query": r["question"],
                 "candidates": list(options.values()),
-                "target": options[r["ground_truth"]],
+                "target": str(r["ground_truth"]) if args.numeric else options[r["ground_truth"]],
                 "answer_raw": r["ground_truth"],
                 "type": r["question_type"],
                 "subset": r["dataset"],

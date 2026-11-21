@@ -11,6 +11,7 @@ The batch keeps fusion_gv's key names so GVJEPATrainer runs unchanged:
 """
 
 import functools
+import json
 import random
 from typing import Any, Dict, List
 
@@ -22,6 +23,7 @@ from torch.utils.data import ConcatDataset, DataLoader, Subset
 
 from jepa3d.paths import expand_paths  # noqa: F401  (sets sys.path for fusion_gv)
 from fusion_gv.gvjepa_trainer import GVJEPADataset
+from jepa3d.balance import KINDS, answer_class, numeric_target, type_key
 from jepa3d.slots import collate_slots
 from jepa3d.x_encoder import CAM_DIM
 from utils.camera import resize_intrinsics
@@ -38,11 +40,12 @@ class PosedSparDataset(GVJEPADataset):
     random k per draw, -1 all."""
 
     def __init__(self, manifest_path, max_views: int | None = None, mask_key: str = "group_id",
-                 num_negatives: int = 0):
+                 num_negatives: int = 0, answer_weights: dict | None = None):
         super().__init__(manifest_path, num_frames=None)
         self.max_views = max_views
         self.mask_key = mask_key
         self.num_negatives = num_negatives
+        self.answer_weights = answer_weights or {}   # {type: {answer class: weight}}, jepa3d/balance.py
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         row = self._read_row(idx)
@@ -58,6 +61,7 @@ class PosedSparDataset(GVJEPADataset):
             "target": row["target"],
             "group_id": row.get(self.mask_key),
             "negatives": negatives,
+            "weight": self.answer_weights.get(type_key(row), {}).get(answer_class(row), 1.0),
             "row": row,
         }
 
@@ -87,6 +91,12 @@ def load_views(sample, image_size):
     return torch.stack(images), torch.stack(Ks).float(), w2c.float()
 
 
+def collate_numeric(rows) -> dict:
+    targets = [numeric_target(row) for row in rows]
+    return {"kind": torch.tensor([KINDS.index(t[0]) if t else -1 for t in targets]),
+            "value": torch.tensor([t[1] if t else 1.0 for t in targets], dtype=torch.float32)}
+
+
 def spar3d_collate(batch: List[Dict[str, Any]], image_size=(224, 308)) -> Dict[str, Any]:
     V = max(len(s["image_paths"]) for s in batch)
     images = torch.zeros(len(batch), V, 3, *image_size)
@@ -107,6 +117,10 @@ def spar3d_collate(batch: List[Dict[str, Any]], image_size=(224, 308)) -> Dict[s
         "group_id": [s["group_id"] for s in batch],
         "negatives": [s["negatives"] for s in batch],
         "rows": [s["row"] for s in batch],
+        # inverse answer-frequency weight of each row (1 without a weight table)
+        "weight": torch.tensor([s.get("weight", 1.0) for s in batch], dtype=torch.float32),
+        # numeric answers (jepa3d/balance.py): kind index into KINDS (-1: not numeric) and the value
+        "numeric": collate_numeric([s["row"] for s in batch]),
         # object slots of the questions (jepa3d/slots.py); None when the manifest has none
         "slots": collate_slots([s["row"] for s in batch]),
     }
@@ -116,7 +130,12 @@ def build_loader(manifests, cfg: dict, batch_size: int, train: bool = True, limi
     dcfg = cfg["data"]
     k = dcfg.get("num_negatives", 0)
     k = k if train or not k else -1   # training samples k per draw, validation scores all
-    datasets = [PosedSparDataset(p, dcfg.get("max_views"), dcfg.get("mask_key", "group_id"), k) for p in manifests]
+    weights = None
+    if train and dcfg.get("answer_weights"):   # table of jepa3d/balance.py; evaluation is never weighted
+        with open(dcfg["answer_weights"]) as f:
+            weights = json.load(f)["weights"]
+    datasets = [PosedSparDataset(p, dcfg.get("max_views"), dcfg.get("mask_key", "group_id"), k, weights)
+                for p in manifests]
     ds = datasets[0] if len(datasets) == 1 else ConcatDataset(datasets)
     if limit:
         ds = Subset(ds, range(min(limit, len(ds))))

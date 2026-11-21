@@ -33,10 +33,12 @@ import torch
 
 from jepa3d.paths import expand_paths  # noqa: F401  (sets sys.path for fusion_gv)
 from fusion_gv.infer_gvjepa import _load_checkpoint, _score_candidate_batch
+from jepa3d.balance import KINDS
 from jepa3d.data import build_loader
 from jepa3d.model import build_model_from_config
 from jepa3d.tools.blind_check import accuracy, modes_of, set_mode, slots_of
 from jepa3d.train import load_config
+from jepa3d.trainer import mean_relative_accuracy
 
 
 def candidates_of(row: dict) -> dict:
@@ -48,6 +50,31 @@ def candidates_of(row: dict) -> dict:
     for cands, _ in out.values():   # the answer must not sit at a fixed index: argmax ties go to index 0
         rng.shuffle(cands)
     return out
+
+
+def numeric_accuracy(model, loader, device, medians: dict) -> dict:
+    """Rows with a numeric answer (jepa3d.balance.numeric_target), read from the model's numeric head:
+    {type: {"mra", "median_mra" (always answering the training median of the kind), "rows"}}."""
+    stats = defaultdict(lambda: [0.0, 0.0, 0])
+    for batch in loader:
+        images = batch["images_vggt"].to(device, non_blocking=True)
+        cams = batch["images_jepa"].to(device, non_blocking=True)
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            model.predict_embedding(images, cams, batch["query"], slots=slots_of(model, batch))
+        kind, value = batch["numeric"]["kind"].to(device), batch["numeric"]["value"].to(device)
+        has = kind >= 0
+        if not has.any():
+            continue
+        guess = model.numeric_output.float()[has, kind[has]].exp()
+        base = torch.tensor([medians[KINDS[k]] for k in kind[has].tolist()], device=device)
+        scores = mean_relative_accuracy(guess, value[has]).tolist()
+        base_scores = mean_relative_accuracy(base, value[has]).tolist()
+        for row, score, base_score in zip([r for r, h in zip(batch["rows"], has.tolist()) if h], scores, base_scores):
+            for key in ("all", f"type/{row.get('type') or row.get('question_type')}"):
+                stats[key][0] += score
+                stats[key][1] += base_score
+                stats[key][2] += 1
+    return {k: {"mra": a / n, "median_mra": b / n, "rows": n} for k, (a, b, n) in sorted(stats.items())}
 
 
 def holdout_accuracy(model, loader, device, slot_log=None) -> dict:
@@ -81,6 +108,9 @@ def main() -> None:
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--holdout", help="omit to score only the --eval manifests")
     parser.add_argument("--eval", nargs="*", default=[])
+    parser.add_argument("--numeric", nargs="*", default=[],
+                        help="manifests of numeric questions, for models with a numeric head")
+    parser.add_argument("--answer-weights", help="table of jepa3d/balance.py: its medians are the numeric baseline")
     parser.add_argument("--output", required=True)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--num-workers", type=int, default=8)
@@ -94,6 +124,10 @@ def main() -> None:
     step = _load_checkpoint(model, args.checkpoint)
     model.to(device).eval()
 
+    medians = {}
+    if args.answer_weights:
+        with open(args.answer_weights) as f:
+            medians = json.load(f)["numeric_median"]
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     results = {"checkpoint": args.checkpoint, "step": step, "holdout": args.holdout}
@@ -110,6 +144,9 @@ def main() -> None:
             for path in args.eval:
                 loader = build_loader([path], cfg, args.batch_size, train=False, limit=args.limit)
                 res[Path(path).stem] = accuracy(model, loader, device)
+            for path in args.numeric if model.numeric_head is not None else []:
+                loader = build_loader([path], cfg, args.batch_size, train=False, limit=args.limit)
+                res[Path(path).stem] = numeric_accuracy(model, loader, device, medians)
         del model._pool_visual
         results[mode] = res
         print(mode, json.dumps(res), flush=True)
