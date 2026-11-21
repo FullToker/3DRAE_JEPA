@@ -110,6 +110,8 @@ def main() -> None:
     parser.add_argument("--eval", nargs="*", default=[])
     parser.add_argument("--numeric", nargs="*", default=[],
                         help="manifests of numeric questions, for models with a numeric head")
+    parser.add_argument("--delexicalize", action="store_true",
+                        help='score the rows with their object names replaced by "object A", ... (jepa3d/delex.py)')
     parser.add_argument("--answer-weights", help="table of jepa3d/balance.py: its medians are the numeric baseline")
     parser.add_argument("--output", required=True)
     parser.add_argument("--batch-size", type=int, default=32)
@@ -119,6 +121,7 @@ def main() -> None:
 
     cfg = load_config(args.config)
     cfg["data"]["val_num_workers"] = args.num_workers
+    cfg["data"]["delexicalize_eval"] = 1.0 if args.delexicalize else 0.0
     device = torch.device("cuda")
     model = build_model_from_config(cfg)
     step = _load_checkpoint(model, args.checkpoint)

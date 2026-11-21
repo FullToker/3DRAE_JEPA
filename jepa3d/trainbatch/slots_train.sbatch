@@ -46,6 +46,8 @@ NAME=${NAME:-slots_v1}   # slots_v1 | slots_v2 (give sbatch --output and --error
 EXP="experiments/$NAME"
 CONFIG="jepa3d/configs/$NAME.yaml"
 DATA=${DATA:-$EXP/data}   # manifests with slots; an experiment that reuses another one's passes DATA=experiments/<other>/data
+# DELEX_EVAL=1: train mode evaluates a second time with all rows delexicalized (jepa3d/delex.py),
+#   eval mode only that way -> results/eval_<ckpt>_delex.json
 # NUMERIC="<jsonl> ..." WEIGHTS=<json of jepa3d/balance.py>: numeric questions for models with a numeric head
 
 cd "$ROOT"
@@ -99,10 +101,17 @@ train)
     $SIF accelerate launch --multi_gpu --num_processes "$NUM_GPUS" jepa3d/train.py --config "$CONFIG"
     echo "[train] done $(date)"
     run_eval "$EXP/ckpt/final.pt" "$EXP/results/eval_final.json"
+    if [ -n "${DELEX_EVAL:-}" ]; then
+        run_eval "$EXP/ckpt/final.pt" "$EXP/results/eval_final_delex.json" --delexicalize
+    fi
     ;;
 eval)
     CHECKPOINT=${CHECKPOINT:-$EXP/ckpt/final.pt}
-    run_eval "$CHECKPOINT" "$EXP/results/eval_$(basename "$CHECKPOINT" .pt).json"
+    if [ -n "${DELEX_EVAL:-}" ]; then
+        run_eval "$CHECKPOINT" "$EXP/results/eval_$(basename "$CHECKPOINT" .pt)_delex.json" --delexicalize
+    else
+        run_eval "$CHECKPOINT" "$EXP/results/eval_$(basename "$CHECKPOINT" .pt).json"
+    fi
     ;;
 diagnose)
     CHECKPOINT=${CHECKPOINT:-$EXP/ckpt/final.pt}

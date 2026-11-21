@@ -12,6 +12,7 @@ The batch keeps fusion_gv's key names so GVJEPATrainer runs unchanged:
 
 import functools
 import json
+import zlib
 import random
 from typing import Any, Dict, List
 
@@ -24,6 +25,7 @@ from torch.utils.data import ConcatDataset, DataLoader, Subset
 from jepa3d.paths import expand_paths  # noqa: F401  (sets sys.path for fusion_gv)
 from fusion_gv.gvjepa_trainer import GVJEPADataset
 from jepa3d.balance import KINDS, answer_class, numeric_target, type_key
+from jepa3d.delex import delexicalize
 from jepa3d.slots import collate_slots
 from jepa3d.x_encoder import CAM_DIM
 from utils.camera import resize_intrinsics
@@ -40,15 +42,23 @@ class PosedSparDataset(GVJEPADataset):
     random k per draw, -1 all."""
 
     def __init__(self, manifest_path, max_views: int | None = None, mask_key: str = "group_id",
-                 num_negatives: int = 0, answer_weights: dict | None = None):
+                 num_negatives: int = 0, answer_weights: dict | None = None, delexicalize: float = 0.0,
+                 fixed: bool = False):
         super().__init__(manifest_path, num_frames=None)
         self.max_views = max_views
         self.mask_key = mask_key
         self.num_negatives = num_negatives
         self.answer_weights = answer_weights or {}   # {type: {answer class: weight}}, jepa3d/balance.py
+        self.delexicalize = delexicalize   # share of rows whose object names become "object A" (jepa3d/delex.py)
+        self.fixed = fixed                 # evaluation: the same rows and letters on every pass
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         row = self._read_row(idx)
+        weight = self.answer_weights.get(type_key(row), {}).get(answer_class(row), 1.0)   # of the original answer
+        if self.delexicalize > 0:
+            rng = random.Random(zlib.crc32(f"{idx}:{row.get('query')}".encode())) if self.fixed else random
+            if rng.random() < self.delexicalize:
+                row = delexicalize(row, rng)
         n = len(row["images"]) if self.max_views is None else self.max_views
         negatives = (row.get("negatives") or []) if self.num_negatives else []
         if 0 < self.num_negatives < len(negatives):
@@ -61,7 +71,7 @@ class PosedSparDataset(GVJEPADataset):
             "target": row["target"],
             "group_id": row.get(self.mask_key),
             "negatives": negatives,
-            "weight": self.answer_weights.get(type_key(row), {}).get(answer_class(row), 1.0),
+            "weight": weight,
             "row": row,
         }
 
@@ -134,8 +144,10 @@ def build_loader(manifests, cfg: dict, batch_size: int, train: bool = True, limi
     if train and dcfg.get("answer_weights"):   # table of jepa3d/balance.py; evaluation is never weighted
         with open(dcfg["answer_weights"]) as f:
             weights = json.load(f)["weights"]
-    datasets = [PosedSparDataset(p, dcfg.get("max_views"), dcfg.get("mask_key", "group_id"), k, weights)
-                for p in manifests]
+    # data.delexicalize: share of training rows; data.delexicalize_eval: of evaluation rows (set by the tools)
+    share = dcfg.get("delexicalize", 0.0) if train else dcfg.get("delexicalize_eval", 0.0)
+    datasets = [PosedSparDataset(p, dcfg.get("max_views"), dcfg.get("mask_key", "group_id"), k, weights, share,
+                                 fixed=not train) for p in manifests]
     ds = datasets[0] if len(datasets) == 1 else ConcatDataset(datasets)
     if limit:
         ds = Subset(ds, range(min(limit, len(ds))))
