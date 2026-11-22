@@ -31,7 +31,7 @@ type); a model without the head has no such parameters.
 
 Config (YAML) layout matches fusion_gv's, with
     fusion:  x_encoder_type: 3drae, x_encoder_output_dim: 768
-    rae:     feature_config, max_views
+    rae:     feature_config, max_views; or encoder: dinotxt, pool, max_views (dino.txt patches instead of 3DRAE)
     slots:   enabled, hidden, mode (add | tokens)
     numeric_head: enabled, hidden
 """
@@ -55,10 +55,15 @@ class ThreeDRAEJEPA(FusionGVJEPA):
     def __init__(self, config, rae_cfg: dict | None = None, slot_cfg: dict | None = None,
                  numeric_cfg: dict | None = None):
         rae_cfg = rae_cfg or {}
-        x_encoder = ThreeDRAEXEncoder(
-            feature_config=rae_cfg.get("feature_config", "configs/models/dino2_feature.yaml"),
-            max_views=rae_cfg.get("max_views", 32),
-        )
+        if rae_cfg.get("encoder", "3drae") == "dinotxt":   # baseline without 3DRAE (jepa3d/x_encoder_dinotxt.py)
+            from jepa3d.x_encoder_dinotxt import DinoTxtXEncoder
+            x_encoder = DinoTxtXEncoder(dim=config.fusion.x_encoder_output_dim, pool=rae_cfg.get("pool", 2),
+                                        max_views=rae_cfg.get("max_views", 32))
+        else:
+            x_encoder = ThreeDRAEXEncoder(
+                feature_config=rae_cfg.get("feature_config", "configs/models/dino2_feature.yaml"),
+                max_views=rae_cfg.get("max_views", 32),
+            )
         if config.fusion.x_encoder_output_dim != x_encoder.dim:
             raise ValueError(
                 f"fusion.x_encoder_output_dim must be {x_encoder.dim} for 3DRAE, "
