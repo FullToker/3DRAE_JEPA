@@ -136,7 +136,8 @@ class ThreeDRAEJEPA(FusionGVJEPA):
             return self.ground_head.zero()
         mean = (tokens * on_name[..., None]).sum(1) / on_name.sum(1, keepdim=True).clamp_min(1)
         moved = {k: v.to(device)[has] for k, v in ground.items() if isinstance(v, torch.Tensor)}
-        return self.ground_head.loss(mean[has], moved)
+        # "kept": which of the batch's labelled names the terms are for
+        return {**self.ground_head.loss(mean[has], moved), "kept": has.nonzero().flatten()}
 
     def _numeric(self):
         return self.numeric_head(self._pooled.float())

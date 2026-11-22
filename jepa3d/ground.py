@@ -44,11 +44,13 @@ class GroundHead(nn.Module):
         zero = sum(p.sum() for p in self.parameters()) * 0.0
         empty = zero.detach().new_zeros(0)
         return {"loss": zero, "regression": zero, "acc": zero.detach(), "error_m": zero.detach(),
-                "errors": empty, "hits": empty, "chance": empty, "rows": empty.long()}
+                "errors": empty, "hits": empty, "chance": empty, "rows": empty.long(),
+                "guess": empty.reshape(0, 3), "kept": empty.long()}
 
     def loss(self, hidden: torch.Tensor, ground: dict) -> dict:
         """hidden (N, dim): mean hidden state of each name's tokens. ground: collate_ground's tensors on its device.
-        -> loss (choice), regression, acc, error_m (median), and per name: errors (metres), hits, chance, rows."""
+        -> loss (choice), regression, acc, error_m (median), and per name: errors (metres), hits, chance, rows,
+        guess (the regressed centre, metres)."""
         with torch.autocast(device_type=hidden.device.type, enabled=False):   # centimetres need float32
             return self._loss(hidden.float(), ground)
 
@@ -67,7 +69,8 @@ class GroundHead(nn.Module):
         hits = (logits.argmax(1) == label).float()
         return {"loss": F.cross_entropy(logits, label), "regression": F.smooth_l1_loss(guess, target),
                 "acc": hits.mean(), "error_m": errors.median(), "errors": errors, "hits": hits,
-                "chance": 1.0 / usable.sum(1).float(), "rows": ground["row"]}
+                "chance": 1.0 / usable.sum(1).float(), "rows": ground["row"],
+                "guess": (guess * scale[:, None]).detach()}   # metres, frame of the first view
 
 
 def load_objects(path: str) -> dict:
