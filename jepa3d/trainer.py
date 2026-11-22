@@ -1,6 +1,7 @@
 """GVJEPATrainer plus a hard-negative term.
 
     loss = InfoNCE (unchanged) + hard_weight * hard [+ slot_weight * slot + slot regression]
+           [+ ground_weight * (ground choice + ground regression)]
 
 hard: for each row that carries "negatives" (same question, wrong answer; see
 jepa3d/hard_negatives.py), cross-entropy of the prediction against
@@ -25,6 +26,10 @@ slot (models with object tokens, jepa3d.slots.ObjectTokens): the model's own
 loss on the output at the object tokens; slot_loss, slot_acc and slot_error_m
 go to the same log. The regression term only trains the head that reports
 metres (it sees a detached output).
+
+ground (models with a GroundHead, jepa3d/ground.py): the head's choice and
+regression terms on the names with a true position; ground_loss, ground_acc
+and ground_error_m (median, metres) go to the same log.
 """
 
 import json
@@ -80,11 +85,13 @@ def hard_logits(pred, target, neg, owner, slot, temperature: float):
 
 class HardNegTrainer(GVJEPATrainer):
     def __init__(self, *args, hard_weight: float = 1.0, slot_weight: float = 1.0, numeric_weight: float = 1.0,
-                 **kwargs):
+                 ground_weight: float = 1.0, **kwargs):
         super().__init__(*args, **kwargs)
         self.hard_weight = hard_weight
         self.slot_weight = slot_weight
         self.numeric_weight = numeric_weight
+        self.ground_weight = ground_weight
+        self._ground = None   # the model's ground terms of the last forward
         self._numeric = None   # the model's numeric head output of the last forward
         self._slot = None   # the model's slot terms of the last forward
         self._steps = 0
@@ -97,7 +104,9 @@ class HardNegTrainer(GVJEPATrainer):
         cams = batch["images_jepa"].to(device, non_blocking=True)
         negatives = batch["negatives"]
         flat = [n for ns in negatives for n in ns]
-        out = model(images, cams, batch["query"], batch["target"] + flat, slots=batch.get("slots"))
+        out = model(images, cams, batch["query"], batch["target"] + flat, slots=batch.get("slots"),
+                    ground=batch.get("ground"))
+        self._ground = {k[7:]: v for k, v in out.items() if k.startswith("ground_")} or None
         B = len(negatives)
         self._slot = {k[5:]: v for k, v in out.items() if k.startswith("slot_")} or None
         self._numeric = out.get("numeric")
@@ -157,6 +166,12 @@ class HardNegTrainer(GVJEPATrainer):
                 loss = loss + self.slot_weight * self._slot["loss"] + self._slot["regression"]
                 for key in ("loss", "acc", "error_m"):
                     self._sums[f"slot_{key}"] += float(self._slot[key])
+            if self._ground is not None:
+                loss = loss + self.ground_weight * (self._ground["loss"] + self._ground["regression"])
+                names = len(self._ground["errors"])
+                self._sums["ground_names"] += names
+                for key in ("loss", "acc", "error_m"):
+                    self._sums[f"ground_{key}"] += float(self._ground[key]) * names
             loss = loss / self.grad_accum_steps
 
         rows = 0 if logits is None else len(logits)
@@ -171,6 +186,8 @@ class HardNegTrainer(GVJEPATrainer):
                        "hard_acc": self._sums["hard_acc"] / n,
                        "hard_rows": self._sums["hard_rows"] / self._sums["rows"],
                        **{k: v / self.log_every for k, v in self._sums.items() if k.startswith("slot_")},
+                       **({k: self._sums[k] / max(self._sums["ground_names"], 1)
+                           for k in ("ground_loss", "ground_acc", "ground_error_m")} if self._ground is not None else {}),
                        **({k: self._sums[k] / max(self._sums["numeric_rows"], 1) for k in ("numeric_loss", "numeric_mra")}
                           if self._numeric is not None else {})}, "train")
             self._sums.clear()
@@ -207,6 +224,9 @@ class HardNegTrainer(GVJEPATrainer):
             if self._slot is not None:
                 for key in ("acc", "error_m"):
                     hits[f"val_slot_{key}"].append(float(self._slot[key]))
+            if self._ground is not None and len(self._ground["errors"]):
+                hits["val_ground_acc"] += self._ground["hits"].tolist()
+                hits["val_ground_error_m"] += self._ground["errors"].tolist()
             if self._numeric is not None:
                 _, mra, count = self._numeric_terms(batch, torch.ones(len(batch["query"]), device=device))
                 hits["val_numeric_mra"] += [mra] * count

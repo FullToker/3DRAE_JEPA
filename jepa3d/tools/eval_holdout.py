@@ -12,7 +12,10 @@ and with three visual inputs (jepa3d/tools/blind_check.py): "real", "shuffled"
 what the images contribute; "chance" is the mean of 1 / candidates.
 --eval manifests (VSI-Bench) are scored as in blind_check.py. A model with
 object slots is also scored with swapped slots, without slots and with
-nothing of the row's own images (blind_check.SLOT_MODES).
+nothing of the row's own images (blind_check.SLOT_MODES). A model with a
+GroundHead (jepa3d/ground.py) also reports, per visual input, how well it
+locates the holdout's labelled names ("ground": median error in metres and
+how often it picks the right object of the scene).
 
 Usage (from the repo root):
     python jepa3d/tools/eval_holdout.py --config <yaml> --checkpoint <pt> \
@@ -77,14 +80,35 @@ def numeric_accuracy(model, loader, device, medians: dict) -> dict:
     return {k: {"mra": a / n, "median_mra": b / n, "rows": n} for k, (a, b, n) in sorted(stats.items())}
 
 
-def holdout_accuracy(model, loader, device, slot_log=None) -> dict:
-    """slot_log: a list that receives (acc, error_m) of the object tokens of every batch that has them."""
+def ground_summary(log: dict) -> dict:
+    """{group: [(error_m, hit, chance)]} -> {group: {"error_m" (median), "acc", "chance", "names", "errors" (a sample)}}"""
+    out = {}
+    for group, values in sorted(log.items()):
+        errors, hits, chance = (torch.tensor(x) for x in zip(*values))
+        sample = errors[torch.randperm(len(errors), generator=torch.Generator().manual_seed(0))[:5000]]
+        out[group] = {"error_m": errors.median().item(), "acc": hits.mean().item(), "chance": chance.mean().item(),
+                      "names": len(errors), "errors": [round(x, 3) for x in sample.tolist()]}
+    return out
+
+
+def holdout_accuracy(model, loader, device, slot_log=None, ground_log=None) -> dict:
+    """slot_log: a list that receives (acc, error_m) of the object tokens of every batch that has them.
+    ground_log: a dict that receives, per group, (error_m, hit, chance) of every labelled name (GroundHead)."""
     stats = defaultdict(lambda: [0, 0, 0.0])   # correct, rows, sum of 1 / candidates
     for batch in loader:
         images = batch["images_vggt"].to(device, non_blocking=True)
         cams = batch["images_jepa"].to(device, non_blocking=True)
+        ground = batch.get("ground") if ground_log is not None else None
         with torch.autocast("cuda", dtype=torch.bfloat16):
-            pred = model.predict_embedding(images, cams, batch["query"], slots=slots_of(model, batch))
+            pred = model.predict_embedding(images, cams, batch["query"], slots=slots_of(model, batch),
+                                           **({"ground": ground} if ground is not None else {}))
+        if ground is not None and model.ground_metrics is not None:
+            m = model.ground_metrics
+            for r, error, hit, chance in zip(m["rows"].tolist(), m["errors"].tolist(), m["hits"].tolist(),
+                                             m["chance"].tolist()):
+                row = batch["rows"][r]
+                for key in ("all", f"{row['source']}/{row['question_type']}", f"subset:{row.get('subset')}"):
+                    ground_log[key].append((error, hit, chance))
         if slot_log is not None and getattr(model, "slot_metrics", None):
             slot_log.append((float(model.slot_metrics["acc"]), float(model.slot_metrics["error_m"])))
         per_row = [candidates_of(row) for row in batch["rows"]]
@@ -138,9 +162,12 @@ def main() -> None:
         set_mode(model, mode)
         with torch.no_grad():
             slot_log, res = [], {}
+            ground_log = defaultdict(list) if getattr(model, "ground_head", None) is not None else None
             if args.holdout:
                 loader = build_loader([args.holdout], cfg, args.batch_size, train=False, limit=args.limit)
-                res["holdout"] = holdout_accuracy(model, loader, device, slot_log)
+                res["holdout"] = holdout_accuracy(model, loader, device, slot_log, ground_log)
+            if ground_log:   # GroundHead: are the labelled names located
+                res["ground"] = ground_summary(ground_log)
             if slot_log:   # object tokens: does the output at the token find the position (mean over batches)
                 res["object_tokens"] = {"acc": sum(a for a, _ in slot_log) / len(slot_log),
                                         "error_m": sum(e for _, e in slot_log) / len(slot_log)}
@@ -152,7 +179,9 @@ def main() -> None:
                 res[Path(path).stem] = numeric_accuracy(model, loader, device, medians)
         del model._pool_visual
         results[mode] = res
-        print(mode, json.dumps(res), flush=True)
+        shown = {**res, **({"ground": {g: {k: v for k, v in m.items() if k != "errors"}
+                                       for g, m in res["ground"].items()}} if "ground" in res else {})}
+        print(mode, json.dumps(shown), flush=True)
         output.write_text(json.dumps(results, indent=2))
     print(f"wrote {output}")
 

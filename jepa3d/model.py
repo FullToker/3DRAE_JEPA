@@ -29,11 +29,19 @@ output (the input of pred_proj) gives one number per kind of numeric answer
 and which kind it is read for is the caller's choice (the row's question
 type); a model without the head has no such parameters.
 
+With "ground: {enabled: true, layer: 4}" (jepa3d/ground.py) the hidden states
+after predictor layer `layer` at the tokens of a labelled object name must
+tell where the object is (GroundHead): forward(..., ground=) returns
+"ground_loss", "ground_regression", "ground_acc" and "ground_error_m",
+predict_embedding() leaves the terms in self.ground_metrics. Nothing is added
+to the predictor's input.
+
 Config (YAML) layout matches fusion_gv's, with
     fusion:  x_encoder_type: 3drae, x_encoder_output_dim: 768
     rae:     feature_config, max_views; or encoder: dinotxt, pool, max_views (dino.txt patches instead of 3DRAE)
     slots:   enabled, hidden, mode (add | tokens)
     numeric_head: enabled, hidden
+    ground:  enabled, layer, hidden
 """
 
 from functools import partial
@@ -47,13 +55,14 @@ import fusion_gv.gvjepa as gvjepa
 from fusion_gv.gvjepa import FusionGVJEPA
 from fusion_gv.gvjepa_trainer import build_model_from_config as _build_fusion_gv_model
 from jepa3d.balance import KINDS
+from jepa3d.ground import GroundHead
 from jepa3d.slots import ObjectTokens, SlotEncoder
 from jepa3d.x_encoder import ThreeDRAEXEncoder, encode_patches, unpack_cams, view_counts
 
 
 class ThreeDRAEJEPA(FusionGVJEPA):
     def __init__(self, config, rae_cfg: dict | None = None, slot_cfg: dict | None = None,
-                 numeric_cfg: dict | None = None):
+                 numeric_cfg: dict | None = None, ground_cfg: dict | None = None):
         rae_cfg = rae_cfg or {}
         if rae_cfg.get("encoder", "3drae") == "dinotxt":   # baseline without 3DRAE (jepa3d/x_encoder_dinotxt.py)
             from jepa3d.x_encoder_dinotxt import DinoTxtXEncoder
@@ -98,6 +107,36 @@ class ThreeDRAEJEPA(FusionGVJEPA):
                 torch.nn.LayerNorm(self.pred_proj.in_features), torch.nn.Linear(self.pred_proj.in_features, hidden),
                 torch.nn.GELU(), torch.nn.Linear(hidden, len(KINDS)))
             self.pred_proj.register_forward_pre_hook(lambda _m, args: setattr(self, "_pooled", args[0]))
+
+        self.ground_head = None
+        self.ground_metrics = None
+        self._ground_hidden = None
+        if (ground_cfg or {}).get("enabled"):
+            if self.object_tokens is not None:
+                raise ValueError("ground and slots.mode: tokens cannot be combined")
+            self.ground_head = GroundHead(self.pred_proj.in_features, ground_cfg.get("hidden", 512))
+            layer = self.predictor.layers[ground_cfg.get("layer", 4) - 1]
+            layer.register_forward_hook(self._tap_ground)
+
+    def _tap_ground(self, _module, _args, out):
+        self._ground_hidden = out[0] if isinstance(out, tuple) else out
+
+    def _ground_loss(self, queries, ground) -> dict:
+        """The GroundHead's terms for the names of `ground` (jepa3d.ground.collate_ground), read from the
+        hidden states the tap kept: (B, S + L, h), the L question tokens last."""
+        hidden, self._ground_hidden = self._ground_hidden, None
+        if ground is None or hidden is None:
+            return self.ground_head.zero()
+        device = hidden.device
+        on_name = self.name_tokens(queries, ground).to(device)                    # (N, L)
+        rows = ground["row"].to(device)
+        tokens = hidden[rows, hidden.shape[1] - on_name.shape[1]:].float()        # (N, L, h)
+        has = on_name.any(1)                                                      # a truncated question may lose a name
+        if not has.any():
+            return self.ground_head.zero()
+        mean = (tokens * on_name[..., None]).sum(1) / on_name.sum(1, keepdim=True).clamp_min(1)
+        moved = {k: v.to(device)[has] for k, v in ground.items() if isinstance(v, torch.Tensor)}
+        return self.ground_head.loss(mean[has], moved)
 
     def _numeric(self):
         return self.numeric_head(self._pooled.float())
@@ -201,10 +240,12 @@ class ThreeDRAEJEPA(FusionGVJEPA):
         device = self._token_outputs.device
         return self.object_tokens.loss(self._token_outputs, slots["pos"][:, 0].to(device), slots["scale"].to(device))
 
-    def forward(self, images, cams, queries, targets=None, mode: str = "infonce", slots=None):
+    def forward(self, images, cams, queries, targets=None, mode: str = "infonce", slots=None, ground=None):
         self._begin(images, cams, queries, slots)
         try:
             out = super().forward(images, cams, queries, targets, mode)
+            if self.ground_head is not None:
+                out.update({f"ground_{k}": v for k, v in self._ground_loss(queries, ground).items()})
             if self.object_tokens is not None:
                 out.update({f"slot_{k}": v for k, v in self._slot_loss(slots).items()})
             if self.numeric_head is not None:
@@ -213,10 +254,12 @@ class ThreeDRAEJEPA(FusionGVJEPA):
         finally:
             self._pending = None
 
-    def predict_embedding(self, images, cams, queries, slots=None):
+    def predict_embedding(self, images, cams, queries, slots=None, ground=None):
         self._begin(images, cams, queries, slots)
         try:
             pred = super().predict_embedding(images, cams, queries)
+            if self.ground_head is not None:
+                self.ground_metrics = None if ground is None else self._ground_loss(queries, ground)
             if self.object_tokens is not None:
                 self.slot_metrics = None if self._token_outputs is None else self._slot_loss(slots)
             if self.numeric_head is not None:
@@ -241,6 +284,6 @@ def build_model_from_config(cfg: dict) -> ThreeDRAEJEPA:
     """fusion_gv's config -> GVJEPAConfig mapping, instantiating ThreeDRAEJEPA."""
     cfg = {**cfg, "fusion": {"jepa_ckpt": None, **cfg["fusion"]}}
     factory = partial(ThreeDRAEJEPA, rae_cfg=cfg.get("rae"), slot_cfg=cfg.get("slots"),
-                      numeric_cfg=cfg.get("numeric_head"))
+                      numeric_cfg=cfg.get("numeric_head"), ground_cfg=cfg.get("ground"))
     with mock.patch.object(gvjepa, "FusionGVJEPA", factory):
         return _build_fusion_gv_model(cfg)

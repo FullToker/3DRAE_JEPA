@@ -1,0 +1,114 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# ground_v1: hardneg_v1 + grounding supervision inside the predictor
+# ──────────────────────────────────────────────────────────────────────────────
+#
+# Why: the answer loss alone never makes the predictor find the object a
+# question names: no layer of hardneg_v1 holds an object's position (read-back
+# 1.8-2.1 m, the mean position gives 2.1 m), and real scene tokens score like
+# another scene's. The answer has few values and can be guessed from the text;
+# a position cannot.
+#
+# Change (jepa3d/ground.py, jepa3d/model.py):
+#   - nothing is added to the predictor's input (no dino.txt hint, no object token);
+#   - after predictor layer 4 (of 8) the mean hidden state of a name's tokens goes
+#     to a GroundHead, which must (a) pick the object's centre among the centres
+#     of the scene's objects (cross-entropy) and (b) regress the centre (smooth L1);
+#   - layers 5-8 and the answer loss (InfoNCE + hard negatives) are unchanged.
+# Labels (jepa3d/tools/build_ground_labels.py -> experiments/ground_v1/data/):
+#   ScanNet: EmbodiedScan box centres; ScanNet++: centres rebuilt from SPAR's own
+#   annotations (centre pixel + stated centre depth, or intersecting centre rays).
+#   Rows without a label only take part in the answer loss.
+# Data, schedule and warm start are those of hardneg_v1 (rows of slots_v2's manifests:
+# the same rows, with the names' character spans).
+#
+# Everything of this experiment lives in experiments/ground_v1/ on the server:
+#   data/  ckpt/  results/  logs/  notebooks/
+#
+# Run: jepa3d/trainbatch/ground_data.sbatch, then NAME=ground_v1 with slots_train.sbatch
+# ──────────────────────────────────────────────────────────────────────────────
+
+init_vljepa_ckpt: ${VJEPA_ROOT}/ckpts/open_vljepa/best.pt
+
+rae:
+  feature_config: configs/models/dino2_feature.yaml   # relative to this repo
+  max_views: 32
+
+fusion:
+  x_encoder_type: 3drae
+  x_encoder_output_dim: 768
+
+ground:
+  enabled: true
+  layer: 4      # read the name tokens after this predictor layer (of 8)
+  hidden: 512
+
+model:
+  query_model_name: meta-llama/Llama-3.2-1B
+  predictor_llama_layers: 8
+  max_query_tokens: 256
+  y_encoder_name: google/embeddinggemma-300m
+  max_target_tokens: 256
+  shared_embed_dim: 1536
+  y_encoder_lr_multiplier: 0.05
+  hf_cache_dir: ${VJEPA_ROOT}/ckpts
+
+data:
+  train_manifests:
+    - ${RAE_ROOT}/experiments/ground_v1/data/train_f8.jsonl
+  val_manifests:
+    - ${RAE_ROOT}/experiments/ground_v1/data/holdout_f8.jsonl   # shuffled, all rows have negatives
+  # true object centres of every scene; the rows' "ground" labels index into it
+  ground_objects: ${RAE_ROOT}/experiments/ground_v1/data/scene_objects.json
+  mask_key: answer_key   # InfoNCE: equal answer_key pairs are masked
+  num_negatives: 3       # wrong answers per row in training (4-way choice); validation scores all
+  image_size: [224, 308]    # (H, W), multiple of 14, ScanNet aspect, as 3DRAE's ScanNet examples
+  num_workers: 8
+  val_num_workers: 2
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 2
+
+train:
+  seed: 42
+  device: cuda
+  precision: bf16
+  output_dir: ${RAE_ROOT}/experiments/ground_v1/ckpt
+
+  batch_size: 32
+  gradient_accumulation_steps: 4
+  # effective batch = 32 * 4 * 3 GPUs = 384. max_steps counts per-rank
+  # micro-batches: 6870 * 32 * 3 = 660k samples = about 1 epoch of train_f8.jsonl
+  # (658,518 rows)
+  # = 1717 optimizer updates.
+  max_steps: 6870
+  hard_weight: 1.0
+  ground_weight: 1.0   # choice + regression of the GroundHead
+
+  clip_grad_norm: 1.0
+  log_every: 50
+  save_every: 0      # final.pt only (~11 GB)
+  val_every: 500
+  val_max_batches: 60   # 1920 holdout rows
+  val_batch_size: 32
+
+  learning_rate: 1.0e-4
+  min_lr: 1.0e-5
+  warmup_steps: 200   # optimizer updates
+  weight_decay: 0.01
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-8
+  scheduler: cosine
+  temperature: 0.07
+
+mlflow:
+  enabled: true
+  env_file: ${VJEPA_ROOT}/.env/mlflow.env
+  tracking_uri: "file:///glob/g01-cache/pf/Yushuo/mlruns"
+  experiment_name: vljepa_sft_from_ckpt
+  run_name: ground_v1
+  log_params: true
+  tags:
+    project: vljepa-3drae
+    variant: A-3drae-dino2-1024
+    data: vsi590k-spar-f8-hardneg-ground

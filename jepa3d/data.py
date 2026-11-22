@@ -26,6 +26,7 @@ from jepa3d.paths import expand_paths  # noqa: F401  (sets sys.path for fusion_g
 from fusion_gv.gvjepa_trainer import GVJEPADataset
 from jepa3d.balance import KINDS, answer_class, numeric_target, type_key
 from jepa3d.delex import delexicalize
+from jepa3d.ground import collate_ground, ground_of, load_objects
 from jepa3d.slots import collate_slots
 from jepa3d.x_encoder import CAM_DIM
 from utils.camera import resize_intrinsics
@@ -43,7 +44,7 @@ class PosedSparDataset(GVJEPADataset):
 
     def __init__(self, manifest_path, max_views: int | None = None, mask_key: str = "group_id",
                  num_negatives: int = 0, answer_weights: dict | None = None, delexicalize: float = 0.0,
-                 fixed: bool = False):
+                 fixed: bool = False, ground_objects: str | None = None):
         super().__init__(manifest_path, num_frames=None)
         self.max_views = max_views
         self.mask_key = mask_key
@@ -51,6 +52,8 @@ class PosedSparDataset(GVJEPADataset):
         self.answer_weights = answer_weights or {}   # {type: {answer class: weight}}, jepa3d/balance.py
         self.delexicalize = delexicalize   # share of rows whose object names become "object A" (jepa3d/delex.py)
         self.fixed = fixed                 # evaluation: the same rows and letters on every pass
+        # true object centres of the scenes (jepa3d/tools/build_ground_labels.py) for the rows' "ground" labels
+        self.objects = load_objects(ground_objects) if ground_objects else None
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         row = self._read_row(idx)
@@ -73,6 +76,7 @@ class PosedSparDataset(GVJEPADataset):
             "negatives": negatives,
             "weight": weight,
             "row": row,
+            "ground": ground_of(row, self.objects, row["c2w"][:n], self.fixed) if self.objects else None,
         }
 
 
@@ -133,6 +137,8 @@ def spar3d_collate(batch: List[Dict[str, Any]], image_size=(224, 308)) -> Dict[s
         "numeric": collate_numeric([s["row"] for s in batch]),
         # object slots of the questions (jepa3d/slots.py); None when the manifest has none
         "slots": collate_slots([s["row"] for s in batch]),
+        # true positions of the named objects (jepa3d/ground.py); None when no row of the batch has a label
+        "ground": collate_ground([s.get("ground") for s in batch]),
     }
 
 
@@ -147,7 +153,7 @@ def build_loader(manifests, cfg: dict, batch_size: int, train: bool = True, limi
     # data.delexicalize: share of training rows; data.delexicalize_eval: of evaluation rows (set by the tools)
     share = dcfg.get("delexicalize", 0.0) if train else dcfg.get("delexicalize_eval", 0.0)
     datasets = [PosedSparDataset(p, dcfg.get("max_views"), dcfg.get("mask_key", "group_id"), k, weights, share,
-                                 fixed=not train) for p in manifests]
+                                 fixed=not train, ground_objects=dcfg.get("ground_objects")) for p in manifests]
     ds = datasets[0] if len(datasets) == 1 else ConcatDataset(datasets)
     if limit:
         ds = Subset(ds, range(min(limit, len(ds))))
