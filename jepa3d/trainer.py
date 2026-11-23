@@ -85,9 +85,10 @@ def hard_logits(pred, target, neg, owner, slot, temperature: float):
 
 class HardNegTrainer(GVJEPATrainer):
     def __init__(self, *args, hard_weight: float = 1.0, slot_weight: float = 1.0, numeric_weight: float = 1.0,
-                 ground_weight: float = 1.0, **kwargs):
+                 ground_weight: float = 1.0, historical_hardneg: bool = False, **kwargs):
         super().__init__(*args, **kwargs)
         self.hard_weight = hard_weight
+        self.historical_hardneg = historical_hardneg
         self.slot_weight = slot_weight
         self.numeric_weight = numeric_weight
         self.ground_weight = ground_weight
@@ -138,6 +139,9 @@ class HardNegTrainer(GVJEPATrainer):
             weights = batch["weight"].to(device) if "weight" in batch else torch.ones(B, device=device)
             if logits is None:
                 hard, acc = pred.sum() * 0.0, 0.0
+            elif self.historical_hardneg:
+                hard = F.cross_entropy(logits, torch.zeros(len(logits), dtype=torch.long, device=device))
+                acc = (logits.argmax(1) == 0).float().mean().item()
             else:
                 per_row = F.cross_entropy(logits, torch.zeros(len(logits), dtype=torch.long, device=device),
                                           reduction="none")
@@ -153,8 +157,13 @@ class HardNegTrainer(GVJEPATrainer):
                 group_ids = dist_gather_ids(group_ids_tensor(
                     batch.get("group_id"), device, batch_size=B, rank=dist.get_rank(), force=True))
                 pred, target = gather_with_grad(pred.float()), gather_with_grad(target.float())
-                all_weights = gather_with_grad(weights)
-            infonce = weighted_infonce(pred.float(), target.float(), self.temperature, group_ids, all_weights)
+                if not self.historical_hardneg:
+                    all_weights = gather_with_grad(weights)
+            if self.historical_hardneg:
+                # Job 12610 at 8c6b50d delegated this loss to the pinned sibling.
+                infonce = bidirectional_infonce(pred, target, temperature=self.temperature, group_ids=group_ids)
+            else:
+                infonce = weighted_infonce(pred.float(), target.float(), self.temperature, group_ids, all_weights)
             loss = infonce * world + self.hard_weight * hard
             if self._numeric is not None:
                 numeric, mra, count = self._numeric_terms(batch, weights)

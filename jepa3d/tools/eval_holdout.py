@@ -25,7 +25,6 @@ Usage (from the repo root):
 
 import argparse
 import json
-import random
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -38,21 +37,11 @@ from jepa3d.paths import expand_paths  # noqa: F401  (sets sys.path for fusion_g
 from fusion_gv.infer_gvjepa import _load_checkpoint, _score_candidate_batch
 from jepa3d.balance import KINDS
 from jepa3d.data import build_loader
+from jepa3d.hard_negatives import candidates_of
 from jepa3d.model import build_model_from_config
 from jepa3d.tools.blind_check import accuracy, modes_of, set_mode, slots_of
 from jepa3d.train import load_config
 from jepa3d.trainer import mean_relative_accuracy
-
-
-def candidates_of(row: dict) -> dict:
-    """{format: (candidates in a fixed random order, answer)}."""
-    out = {"long": ([row["target"], *row["negatives"]], row["target"])}
-    if row.get("options") and row.get("target_short") in row["options"]:
-        out["short"] = (list(dict.fromkeys(row["options"])), row["target_short"])
-    rng = random.Random(f"{row['scene']}:{row['query']}")
-    for cands, _ in out.values():   # the answer must not sit at a fixed index: argmax ties go to index 0
-        rng.shuffle(cands)
-    return out
 
 
 def numeric_accuracy(model, loader, device, medians: dict) -> dict:

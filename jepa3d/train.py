@@ -123,6 +123,7 @@ def main() -> None:
             trainer_cls, extra = HardNegTrainer, {"hard_weight": tcfg.get("hard_weight", 1.0),
                                                  "slot_weight": tcfg.get("slot_weight", 1.0),
                                                  "numeric_weight": tcfg.get("numeric_weight", 1.0),
+                                                 "historical_hardneg": cfg.get("rae", {}).get("question_only", False),
                                                  "ground_weight": tcfg.get("ground_weight", 1.0)}
         else:
             trainer_cls, extra = GVJEPATrainer, {}

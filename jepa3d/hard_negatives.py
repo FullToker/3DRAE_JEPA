@@ -26,6 +26,17 @@ SWAP_PAIRS = (("left", "right"), ("above", "below"), ("closer", "farther"))
 MAX_NEGATIVES = 7
 
 
+def candidates_of(row: dict) -> dict:
+    """Historical holdout readout, including its per-question option order."""
+    out = {"long": ([row["target"], *row["negatives"]], row["target"])}
+    if row.get("options") and row.get("target_short") in row["options"]:
+        out["short"] = (list(dict.fromkeys(row["options"])), row["target_short"])
+    rng = random.Random(f"{row['scene']}:{row['query']}")
+    for candidates, _ in out.values():
+        rng.shuffle(candidates)
+    return out
+
+
 def vsi_negatives(row: dict, renderer) -> tuple[list, str]:
     """-> (negatives, status). renderer: jepa3d.vsi_text.Renderer."""
     options, short = row.get("options") or [], row.get("target_short")

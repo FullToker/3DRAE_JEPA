@@ -83,6 +83,16 @@ class ThreeDRAEJEPA(FusionGVJEPA):
         # FusionGVJEPA.__init__ builds its X-encoder by name; hand it ours instead.
         with mock.patch.object(gvjepa, "build_x_encoder", lambda _cfg: x_encoder):
             super().__init__(config)
+        # Construct the same modules first so the warm start, random initialization
+        # and optimizer groups match the visual baseline in every other respect.
+        self.question_only = rae_cfg.get("question_only", False)
+        if self.question_only and (getattr(x_encoder, "num_latents", None) != 1024 or x_encoder.dim != 768
+                                   or any((group or {}).get("enabled") for group in (slot_cfg, numeric_cfg, ground_cfg))):
+            raise ValueError("The paired question-only control requires the slot-free 1024 x 768 3DRAE model")
+        if self.question_only:
+            # Strict loading distinguishes a trained control from a visual
+            # checkpoint evaluated with its scene zeroed after training.
+            self.register_buffer("question_only_prefix_length", torch.tensor(1032))
         self._pending = None   # (queries, slots) of the forward in progress
         self.slot_encoder = None
         self.object_tokens = None
@@ -276,8 +286,11 @@ class ThreeDRAEJEPA(FusionGVJEPA):
         means FusionGVJEPA tags every token with the same frame_embed row and
         frame shuffling is a no-op.
         """
-        with torch.profiler.record_function("x_encoder"):
-            tokens = self.x_encoder(images, cams)
+        if self.question_only:
+            tokens = self.vis_proj.weight.new_zeros((batch_size, 1024 + 8, 768))
+        else:
+            with torch.profiler.record_function("x_encoder"):
+                tokens = self.x_encoder(images, cams)
         return tokens, tokens.unsqueeze(1)
 
 

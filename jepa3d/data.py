@@ -111,7 +111,7 @@ def collate_numeric(rows) -> dict:
             "value": torch.tensor([t[1] if t else 1.0 for t in targets], dtype=torch.float32)}
 
 
-def spar3d_collate(batch: List[Dict[str, Any]], image_size=(224, 308)) -> Dict[str, Any]:
+def _visual_batch(batch, image_size):
     V = max(len(s["image_paths"]) for s in batch)
     images = torch.zeros(len(batch), V, 3, *image_size)
     cams = torch.zeros(len(batch), V, CAM_DIM)
@@ -122,6 +122,17 @@ def spar3d_collate(batch: List[Dict[str, Any]], image_size=(224, 308)) -> Dict[s
         images[i, :n] = imgs.clamp(0, 1)
         cams[i, :n, :9] = K.flatten(1)
         cams[i, :n, 9:] = w2c.flatten(1)
+    return images, cams
+
+
+def spar3d_collate(batch: List[Dict[str, Any]], image_size=(224, 308), question_only=False) -> Dict[str, Any]:
+    if question_only:
+        # The parent needs a device and batch dimension. These constants carry
+        # no row data. The model bypasses its visual encoder before projection.
+        images = torch.zeros(len(batch), 8, 3, 1, 1)
+        cams = torch.zeros(len(batch), 8, CAM_DIM)
+    else:
+        images, cams = _visual_batch(batch, image_size)
     return {
         "images_vggt": images,
         "images_jepa": cams,
@@ -136,9 +147,9 @@ def spar3d_collate(batch: List[Dict[str, Any]], image_size=(224, 308)) -> Dict[s
         # numeric answers (jepa3d/balance.py): kind index into KINDS (-1: not numeric) and the value
         "numeric": collate_numeric([s["row"] for s in batch]),
         # object slots of the questions (jepa3d/slots.py); None when the manifest has none
-        "slots": collate_slots([s["row"] for s in batch]),
+        "slots": None if question_only else collate_slots([s["row"] for s in batch]),
         # true positions of the named objects (jepa3d/ground.py); None when no row of the batch has a label
-        "ground": collate_ground([s.get("ground") for s in batch]),
+        "ground": None if question_only else collate_ground([s.get("ground") for s in batch]),
     }
 
 
@@ -164,7 +175,8 @@ def build_loader(manifests, cfg: dict, batch_size: int, train: bool = True, limi
         "drop_last": train,
         "num_workers": num_workers,
         "pin_memory": dcfg.get("pin_memory", True),
-        "collate_fn": functools.partial(spar3d_collate, image_size=tuple(dcfg["image_size"])),
+        "collate_fn": functools.partial(spar3d_collate, image_size=tuple(dcfg["image_size"]),
+                                        question_only=cfg.get("rae", {}).get("question_only", False)),
     }
     if num_workers > 0 and train:
         kwargs["persistent_workers"] = dcfg.get("persistent_workers", True)
