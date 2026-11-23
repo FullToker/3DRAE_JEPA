@@ -40,6 +40,7 @@ import torch.distributed as dist
 import torch.nn.functional as F
 
 from jepa3d.paths import expand_paths  # noqa: F401  (sets sys.path for fusion_gv)
+from jepa3d.names import name_terms
 from fusion_gv.gvjepa_trainer import (
     GVJEPATrainer,
     _world_size,
@@ -85,12 +86,14 @@ def hard_logits(pred, target, neg, owner, slot, temperature: float):
 
 class HardNegTrainer(GVJEPATrainer):
     def __init__(self, *args, hard_weight: float = 1.0, slot_weight: float = 1.0, numeric_weight: float = 1.0,
-                 ground_weight: float = 1.0, **kwargs):
+                 ground_weight: float = 1.0, name_weight: float = 1.0, **kwargs):
         super().__init__(*args, **kwargs)
         self.hard_weight = hard_weight
         self.slot_weight = slot_weight
         self.numeric_weight = numeric_weight
         self.ground_weight = ground_weight
+        self.name_weight = name_weight
+        self._name = None
         self._ground = None   # the model's ground terms of the last forward
         self._numeric = None   # the model's numeric head output of the last forward
         self._slot = None   # the model's slot terms of the last forward
@@ -110,6 +113,9 @@ class HardNegTrainer(GVJEPATrainer):
         B = len(negatives)
         self._slot = {k[5:]: v for k, v in out.items() if k.startswith("slot_")} or None
         self._numeric = out.get("numeric")
+        self._name = None
+        if "name_pred" in out:   # second target for object-name answers (jepa3d/names.py)
+            self._name = name_terms(self.accelerator.unwrap_model(model).x_encoder, out["name_pred"], batch["rows"])
         pred, target = out["pred"], out["target"][:B]
         if not flat:
             return pred, target, None, None
@@ -162,6 +168,10 @@ class HardNegTrainer(GVJEPATrainer):
                 self._sums["numeric_loss"] += numeric.item() * count
                 self._sums["numeric_mra"] += mra * count
                 self._sums["numeric_rows"] += count
+            if self._name is not None:
+                loss = loss + self.name_weight * self._name["loss"]
+                self._sums["name_acc"] += sum(self._name["hits"])
+                self._sums["name_rows"] += len(self._name["hits"])
             if self._slot is not None:
                 loss = loss + self.slot_weight * self._slot["loss"] + self._slot["regression"]
                 for key in ("loss", "acc", "error_m"):
@@ -189,7 +199,9 @@ class HardNegTrainer(GVJEPATrainer):
                        **({k: self._sums[k] / max(self._sums["ground_names"], 1)
                            for k in ("ground_loss", "ground_acc", "ground_error_m")} if self._ground is not None else {}),
                        **({k: self._sums[k] / max(self._sums["numeric_rows"], 1) for k in ("numeric_loss", "numeric_mra")}
-                          if self._numeric is not None else {})}, "train")
+                          if self._numeric is not None else {}),
+                       **({"name_acc": self._sums["name_acc"] / max(self._sums["name_rows"], 1)}
+                          if self._name is not None else {})}, "train")
             self._sums.clear()
         return loss, infonce.item()
 

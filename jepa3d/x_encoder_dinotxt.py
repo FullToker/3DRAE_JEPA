@@ -30,7 +30,8 @@ class DinoTxtXEncoder(nn.Module):
     def __init__(self, dim: int = 768, pool: int = 2, max_views: int = 32):
         super().__init__()
         from jepa3d.tools.check_teacher_grounding import load_dinotxt
-        self.teacher, _ = load_dinotxt("cpu")
+        self.teacher, self.tokenizer = load_dinotxt("cpu")
+        self._text = {}   # name -> text vector (cpu), filled on demand
         self.teacher.requires_grad_(False)
         self.dim, self.pool, self.max_views = dim, pool, max_views
         with torch.no_grad():
@@ -53,6 +54,19 @@ class DinoTxtXEncoder(nn.Module):
         super().train(mode)
         self.teacher.eval()
         return self
+
+    @torch.no_grad()
+    def text_vectors(self, names) -> torch.Tensor:
+        """Object names -> (N, C) frozen text vectors, the half that is aligned with patch features."""
+        new = sorted({n for n in names if n not in self._text})
+        device = self.mean.device
+        for start in range(0, len(new), 64):
+            chunk = new[start:start + 64]
+            tokens = self.tokenizer.tokenize([f"a photo of a {n}" for n in chunk]).to(device)
+            features = self.teacher.encode_text(tokens).float()
+            for name, vector in zip(chunk, features[:, features.shape[-1] // 2:].cpu()):
+                self._text[name] = vector
+        return torch.stack([self._text[n] for n in names]).to(device)
 
     @torch.no_grad()
     def _features(self, images):

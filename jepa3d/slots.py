@@ -181,7 +181,7 @@ def collate_slots(rows, drop: bool = False):
     """Rows' "slots" -> None if the batch has none, else
     {"pos" (N, K, 3), "conf" (N, K), "row" (N,) batch index, "spans" list of N span lists,
      "scale" (N,) scene scale, "patch" (N, K) if the manifest has it}."""
-    pos, conf, owner, spans, scale, patch = [], [], [], [], [], []
+    pos, conf, owner, spans, scale, patch, names = [], [], [], [], [], [], []
     for i, row in enumerate(rows):
         for slot in ([] if drop else row.get("slots") or []):
             k = min(len(slot["pos"]), NUM_CANDIDATES)
@@ -190,13 +190,15 @@ def collate_slots(rows, drop: bool = False):
             conf.append(slot["conf"][:k] + [slot["conf"][0]] * pad)
             owner.append(i)
             spans.append(slot["spans"])
+            names.append(slot.get("name", ""))
             scale.append(scene_scale(row["c2w"]) if "c2w" in row else 1.0)
             if "patch" in slot:
                 patch.append(slot["patch"][:k] + [slot["patch"][0]] * pad)
     if not pos:
         return None
     out = {"pos": torch.tensor(pos, dtype=torch.float32), "conf": torch.tensor(conf, dtype=torch.float32),
-           "row": torch.tensor(owner), "spans": spans, "scale": torch.tensor(scale, dtype=torch.float32)}
+           "row": torch.tensor(owner), "spans": spans, "names": names,
+           "scale": torch.tensor(scale, dtype=torch.float32)}
     if len(patch) == len(pos):
         out["patch"] = torch.tensor(patch)
     return out

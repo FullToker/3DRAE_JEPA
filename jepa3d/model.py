@@ -39,7 +39,8 @@ to the predictor's input.
 Config (YAML) layout matches fusion_gv's, with
     fusion:  x_encoder_type: 3drae, x_encoder_output_dim: 768
     rae:     feature_config, max_views; or encoder: dinotxt, pool, max_views (dino.txt patches instead of 3DRAE)
-    slots:   enabled, hidden, mode (add | tokens)
+    slots:   enabled, hidden, mode (add | tokens | text: dino.txt name vectors, jepa3d/names.py)
+    name_target: enabled, hidden (jepa3d/names.py)
     numeric_head: enabled, hidden
     ground:  enabled, layer, hidden
 """
@@ -62,7 +63,7 @@ from jepa3d.x_encoder import ThreeDRAEXEncoder, encode_patches, unpack_cams, vie
 
 class ThreeDRAEJEPA(FusionGVJEPA):
     def __init__(self, config, rae_cfg: dict | None = None, slot_cfg: dict | None = None,
-                 numeric_cfg: dict | None = None, ground_cfg: dict | None = None):
+                 numeric_cfg: dict | None = None, ground_cfg: dict | None = None, name_cfg: dict | None = None):
         rae_cfg = rae_cfg or {}
         if rae_cfg.get("encoder", "3drae") == "dinotxt":   # baseline without 3DRAE (jepa3d/x_encoder_dinotxt.py)
             from jepa3d.x_encoder_dinotxt import DinoTxtXEncoder
@@ -94,6 +95,9 @@ class ThreeDRAEJEPA(FusionGVJEPA):
                                               slot_cfg.get("hidden", 512))
             self.predictor.register_forward_pre_hook(self._append_tokens, with_kwargs=True)
             self.predictor.register_forward_hook(self._remove_tokens, with_kwargs=True)
+        elif slot_cfg.get("enabled") and slot_cfg.get("mode") == "text":   # jepa3d/names.py
+            self.name_gain = torch.nn.Parameter(torch.ones(()))
+            self.query_in_proj.register_forward_hook(self._add_names)
         elif slot_cfg.get("enabled"):
             self.slot_encoder = SlotEncoder(self.vis_proj.out_features, slot_cfg.get("hidden", 512))
             self.query_in_proj.register_forward_hook(self._add_slots)
@@ -107,6 +111,16 @@ class ThreeDRAEJEPA(FusionGVJEPA):
                 torch.nn.LayerNorm(self.pred_proj.in_features), torch.nn.Linear(self.pred_proj.in_features, hidden),
                 torch.nn.GELU(), torch.nn.Linear(hidden, len(KINDS)))
             self.pred_proj.register_forward_pre_hook(lambda _m, args: setattr(self, "_pooled", args[0]))
+
+        self.name_head = None
+        self.name_output = None
+        if (name_cfg or {}).get("enabled"):   # second target for object-name answers (jepa3d/names.py)
+            hidden, width = name_cfg.get("hidden", 512), x_encoder.feat_proj[0].normalized_shape[0]
+            self.name_head = torch.nn.Sequential(
+                torch.nn.LayerNorm(self.pred_proj.in_features), torch.nn.Linear(self.pred_proj.in_features, hidden),
+                torch.nn.GELU(), torch.nn.Linear(hidden, width))
+            if self.numeric_head is None:
+                self.pred_proj.register_forward_pre_hook(lambda _m, args: setattr(self, "_pooled", args[0]))
 
         self.ground_head = None
         self.ground_metrics = None
@@ -144,7 +158,7 @@ class ThreeDRAEJEPA(FusionGVJEPA):
 
     @property
     def uses_slots(self) -> bool:
-        return self.slot_encoder is not None or self.object_tokens is not None
+        return self.slot_encoder is not None or self.object_tokens is not None or hasattr(self, "name_gain")
 
     def name_tokens(self, queries, slots) -> torch.Tensor:
         """(N, L) bool: the query tokens (as the predictor tokenizes them) that spell each slot's name."""
@@ -166,6 +180,19 @@ class ThreeDRAEJEPA(FusionGVJEPA):
         on_name = self.name_tokens(queries, slots).to(q_emb.device)
         assert on_name.shape[1] == q_emb.shape[1]
         vectors = self.slot_encoder(slots["pos"].to(q_emb.device), slots["conf"].to(q_emb.device))   # (N, h)
+        add = on_name[..., None] * vectors[:, None].to(q_emb.dtype)
+        return q_emb.index_add(0, slots["row"].to(q_emb.device), add)
+
+    def _add_names(self, _module, _inputs, q_emb):
+        """Forward hook on query_in_proj: each name's dino.txt text vector, through the projections of the
+        patch features, added on the name's tokens."""
+        if self._pending is None or self._pending[1] is None:
+            return None
+        queries, slots = self._pending[:2]
+        on_name = self.name_tokens(queries, slots).to(q_emb.device)
+        assert on_name.shape[1] == q_emb.shape[1]
+        text = self.x_encoder.text_vectors(slots["names"]).to(q_emb.device)
+        vectors = self.vis_proj(self.x_encoder.feat_proj(text)) * self.name_gain                # (N, h)
         add = on_name[..., None] * vectors[:, None].to(q_emb.dtype)
         return q_emb.index_add(0, slots["row"].to(q_emb.device), add)
 
@@ -251,6 +278,8 @@ class ThreeDRAEJEPA(FusionGVJEPA):
                 out.update({f"slot_{k}": v for k, v in self._slot_loss(slots).items()})
             if self.numeric_head is not None:
                 out["numeric"] = self._numeric()
+            if self.name_head is not None:
+                out["name_pred"] = self.name_head(self._pooled.float())
             return out
         finally:
             self._pending = None
@@ -265,6 +294,8 @@ class ThreeDRAEJEPA(FusionGVJEPA):
                 self.slot_metrics = None if self._token_outputs is None else self._slot_loss(slots)
             if self.numeric_head is not None:
                 self.numeric_output = self._numeric()
+            if self.name_head is not None:
+                self.name_output = self.name_head(self._pooled.float())
             return pred
         finally:
             self._pending = None
@@ -285,6 +316,7 @@ def build_model_from_config(cfg: dict) -> ThreeDRAEJEPA:
     """fusion_gv's config -> GVJEPAConfig mapping, instantiating ThreeDRAEJEPA."""
     cfg = {**cfg, "fusion": {"jepa_ckpt": None, **cfg["fusion"]}}
     factory = partial(ThreeDRAEJEPA, rae_cfg=cfg.get("rae"), slot_cfg=cfg.get("slots"),
-                      numeric_cfg=cfg.get("numeric_head"), ground_cfg=cfg.get("ground"))
+                      numeric_cfg=cfg.get("numeric_head"), ground_cfg=cfg.get("ground"),
+                      name_cfg=cfg.get("name_target"))
     with mock.patch.object(gvjepa, "FusionGVJEPA", factory):
         return _build_fusion_gv_model(cfg)

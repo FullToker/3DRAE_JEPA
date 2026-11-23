@@ -1,0 +1,100 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# dinotxt_q_v1: dinotxt_enc_v1 + dino.txt text vectors on the object names of the question
+# ──────────────────────────────────────────────────────────────────────────────
+#
+# Why: in dinotxt_enc_v1 the scene tokens are dino.txt patch features, but the question is
+# plain Llama word embeddings, so dino.txt's text-patch alignment is never offered to the model.
+# Change: each object name's dino.txt text vector goes through the same projections as the
+# patch features and is added on the name's tokens (slots.mode: text). Control at evaluation:
+# slots_swapped puts another name's vector there, slots_none adds nothing.
+#
+# Everything else is dinotxt_enc_v1 (dino.txt patches as scene tokens, hardneg_v1's
+# schedule, losses and initial weights; y-encoder unchanged). Manifests: slots_v2's
+# (the same rows as hardneg_v1's, with the names' character spans).
+#
+# Everything of this experiment lives in experiments/dinotxt_q_v1/ on the server.
+# Run: slots_train.sbatch with NAME=dinotxt_q_v1 DATA=experiments/slots_v2/data
+# ──────────────────────────────────────────────────────────────────────────────
+
+init_vljepa_ckpt: ${VJEPA_ROOT}/ckpts/open_vljepa/best.pt
+
+rae:
+  encoder: dinotxt   # jepa3d/x_encoder_dinotxt.py
+  pool: 2            # patches averaged per side: 16 x 22 -> 8 x 11 tokens per view
+  max_views: 32
+
+slots:
+  enabled: true
+  mode: text   # dino.txt text vectors on the question's object names (jepa3d/names.py)
+
+fusion:
+  x_encoder_type: 3drae
+  x_encoder_output_dim: 768
+
+model:
+  query_model_name: meta-llama/Llama-3.2-1B
+  predictor_llama_layers: 8
+  max_query_tokens: 256
+  y_encoder_name: google/embeddinggemma-300m
+  max_target_tokens: 256
+  shared_embed_dim: 1536
+  y_encoder_lr_multiplier: 0.05
+  hf_cache_dir: ${VJEPA_ROOT}/ckpts
+
+data:
+  train_manifests:
+    - ${RAE_ROOT}/experiments/slots_v2/data/train_f8.jsonl
+  val_manifests:
+    - ${RAE_ROOT}/experiments/slots_v2/data/holdout_f8.jsonl   # shuffled, all rows have negatives
+  mask_key: answer_key   # InfoNCE: equal answer_key pairs are masked
+  num_negatives: 3       # wrong answers per row in training (4-way choice); validation scores all
+  image_size: [224, 308]    # (H, W), multiple of 14, ScanNet aspect, as 3DRAE's ScanNet examples
+  num_workers: 8
+  val_num_workers: 2
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 2
+
+train:
+  seed: 42
+  device: cuda
+  precision: bf16
+  output_dir: ${RAE_ROOT}/experiments/dinotxt_q_v1/ckpt
+
+  batch_size: 32
+  gradient_accumulation_steps: 4
+  # effective batch = 32 * 4 * 3 GPUs = 384. max_steps counts per-rank
+  # micro-batches: 6870 * 32 * 3 = 660k samples = about 1 epoch of train_f8.jsonl
+  # (about 95% of 694,280 rows; exact count in train_f8.jsonl.stats.json)
+  # = 1717 optimizer updates.
+  max_steps: 6870
+  hard_weight: 1.0
+
+  clip_grad_norm: 1.0
+  log_every: 50
+  save_every: 0      # final.pt only (~11 GB)
+  val_every: 500
+  val_max_batches: 60   # 1920 holdout rows
+  val_batch_size: 32
+
+  learning_rate: 1.0e-4
+  min_lr: 1.0e-5
+  warmup_steps: 200   # optimizer updates
+  weight_decay: 0.01
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-8
+  scheduler: cosine
+  temperature: 0.07
+
+mlflow:
+  enabled: true
+  env_file: ${VJEPA_ROOT}/.env/mlflow.env
+  tracking_uri: "file:///glob/g01-cache/pf/Yushuo/mlruns"
+  experiment_name: vljepa_sft_from_ckpt
+  run_name: dinotxt_q_v1
+  log_params: true
+  tags:
+    project: vljepa-3drae
+    variant: dinotxt-patches-704
+    data: vsi590k-spar-f8-hardneg

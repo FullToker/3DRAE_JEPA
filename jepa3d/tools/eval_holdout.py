@@ -37,6 +37,7 @@ import torch
 from jepa3d.paths import expand_paths  # noqa: F401  (sets sys.path for fusion_gv)
 from fusion_gv.infer_gvjepa import _load_checkpoint, _score_candidate_batch
 from jepa3d.balance import KINDS
+from jepa3d.names import name_options, name_terms
 from jepa3d.data import build_loader
 from jepa3d.model import build_model_from_config
 from jepa3d.tools.blind_check import accuracy, modes_of, set_mode, slots_of
@@ -53,6 +54,26 @@ def candidates_of(row: dict) -> dict:
     for cands, _ in out.values():   # the answer must not sit at a fixed index: argmax ties go to index 0
         rng.shuffle(cands)
     return out
+
+
+def name_accuracy(model, loader, device) -> dict:
+    """Rows whose answer is one of several object names (jepa3d.names.name_options), answered by the
+    name head in dino.txt's text space: {type: accuracy among the row's own options}."""
+    stats = defaultdict(lambda: [0, 0])
+    for batch in loader:
+        if not any(name_options(row) for row in batch["rows"]):
+            continue
+        images = batch["images_vggt"].to(device, non_blocking=True)
+        cams = batch["images_jepa"].to(device, non_blocking=True)
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            model.predict_embedding(images, cams, batch["query"], slots=slots_of(model, batch))
+        terms = name_terms(model.x_encoder, model.name_output, batch["rows"])
+        for r, hit in zip(terms["rows"], terms["hits"]):
+            row = batch["rows"][r]
+            for key in ("all", f"type/{row.get('type') or row.get('question_type')}"):
+                stats[key][0] += int(hit)
+                stats[key][1] += 1
+    return {k: {"acc": c / n, "rows": n} for k, (c, n) in sorted(stats.items())}
 
 
 def numeric_accuracy(model, loader, device, medians: dict) -> dict:
@@ -174,6 +195,9 @@ def main() -> None:
             for path in args.eval:
                 loader = build_loader([path], cfg, args.batch_size, train=False, limit=args.limit)
                 res[Path(path).stem] = accuracy(model, loader, device)
+            for path in ([args.holdout] if args.holdout else []) + args.eval if model.name_head is not None else []:
+                loader = build_loader([path], cfg, args.batch_size, train=False, limit=args.limit)
+                res.setdefault("name_head", {})[Path(path).stem] = name_accuracy(model, loader, device)
             for path in args.numeric if model.numeric_head is not None else []:
                 loader = build_loader([path], cfg, args.batch_size, train=False, limit=args.limit)
                 res[Path(path).stem] = numeric_accuracy(model, loader, device, medians)

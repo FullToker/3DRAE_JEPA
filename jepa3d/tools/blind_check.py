@@ -69,6 +69,8 @@ def slots_of(model, batch):
     if model._slot_mode in ("slots_swapped", "all_shuffled"):
         shift = max(1, len(slots["row"]) // 2)
         slots = {**slots, **{k: slots[k].roll(shift, 0) for k in ("pos", "conf", "patch", "scale") if k in slots}}
+        if "names" in slots:   # dino.txt name vectors (jepa3d/names.py): another name's vector on this name's tokens
+            slots["names"] = slots["names"][-shift:] + slots["names"][:-shift]
     return slots
 
 
