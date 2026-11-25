@@ -9,8 +9,8 @@ Input. A name's token is built from what is already in the predictor's input:
           + vis_proj(feat_proj(text vector of the name))   what the object is, also when it is not in view
           + type embedding                                  marks the token as a placeholder
     w = softmax(z / tau),  z = cos(text vector, dino.txt patch feature - mean patch feature of the row),
-                           standardized over the row's cells; tau is learned, 0.5 at the start
-    (the raw cosines differ so little that a softmax over them averaged 215 of the 704 cells)
+                           standardized over the row's cells; tau is learned, 0.2 at the start
+    (a softmax over the raw cosines averaged 215 of the 704 cells, tau 0.5 on the standardized ones 101)
 
 so before any training the token already sits on the cells dino.txt matches to
 the name. It is appended to the predictor's input with the position id of the
@@ -51,7 +51,7 @@ def per_row(rows: torch.Tensor, left: torch.Tensor, right: torch.Tensor) -> torc
 
 class ObjectPointers(nn.Module):
     def __init__(self, dim: int, layers=(2, 4), embed: int = 256, temperature: float = 0.07,
-                 init_temperature: float = 0.5):
+                 init_temperature: float = 0.2):
         super().__init__()
         self.layers, self.temperature = tuple(layers), temperature
         self.type_embed = nn.Parameter(torch.randn(dim) * 0.02)
