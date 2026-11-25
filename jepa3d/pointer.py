@@ -43,7 +43,7 @@ def per_row(rows: torch.Tensor, left: torch.Tensor, right: torch.Tensor) -> torc
     out = left.new_zeros(len(left), right.shape[-1])
     for b in rows.unique().tolist():
         mine = rows == b
-        out[mine] = left[mine] @ right[b]
+        out[mine] = (left[mine] @ right[b]).to(out.dtype)   # under autocast the product is bfloat16
     return out
 
 
