@@ -32,6 +32,7 @@ class DinoTxtXEncoder(nn.Module):
         from jepa3d.tools.check_teacher_grounding import load_dinotxt
         self.teacher, self.tokenizer = load_dinotxt("cpu")
         self._text = {}   # name -> text vector (cpu), filled on demand
+        self.last = None  # set by forward()
         self.teacher.requires_grad_(False)
         self.dim, self.pool, self.max_views = dim, pool, max_views
         with torch.no_grad():
@@ -103,7 +104,10 @@ class DinoTxtXEncoder(nn.Module):
         h, w = feats.shape[2:4]
         feats = feats.flatten(2, 3)                                                     # (B, V, P, C)
         index = self.view_index_embed.weight[:V]
-        patches = self.feat_proj(feats) + self.ray_mlp(self._rays(K, w2c, h, w)) + index[None, :, None]
+        rays = self._rays(K, w2c, h, w)
+        # for jepa3d.pointer: the frozen features, which views are real, the rays and the grid of this batch
+        self.last = {"features": feats, "valid": valid, "rays": rays, "grid": (h, w)}
+        patches = self.feat_proj(feats) + self.ray_mlp(rays) + index[None, :, None]
         patches = torch.where(valid[..., None, None], patches, self.pad_token.to(patches.dtype))
         patches = patches.flatten(1, 2) + self.token_type_embed.weight[0]
 

@@ -15,7 +15,12 @@ object slots is also scored with swapped slots, without slots and with
 nothing of the row's own images (blind_check.SLOT_MODES). A model with a
 GroundHead (jepa3d/ground.py) also reports, per visual input, how well it
 locates the holdout's labelled names ("ground": median error in metres and
-how often it picks the right object of the scene).
+how often it picks the right object of the scene). A model with object
+pointers (jepa3d/pointer.py) reports "pointer": per supervised layer how often
+the placeholder's best cell is on the object and the distance of that cell's
+ray from the object, next to the untrained choice ("init"), over all labelled
+names and split by whether the untrained choice was right. --checkpoint none
+scores the model as built (the untrained choice needs no training).
 
 Usage (from the repo root):
     python jepa3d/tools/eval_holdout.py --config <yaml> --checkpoint <pt> \
@@ -112,14 +117,32 @@ def ground_summary(log: dict) -> dict:
     return out
 
 
-def holdout_accuracy(model, loader, device, slot_log=None, ground_log=None) -> dict:
+def pointer_summary(log: dict) -> dict:
+    """{group: [{term: value of one name}]} -> {group: {"names", "chance", "<what>_acc", "<what>_error_m" (median)}}"""
+    out = {}
+    for group, names in sorted(log.items()):
+        res = {"names": len(names)}
+        for key in names[0]:
+            values = torch.tensor([name[key] for name in names])
+            if key.endswith("_hits"):
+                res[f"{key[:-5]}_acc"] = values.mean().item()
+            elif key.endswith("_errors"):
+                res[f"{key[:-7]}_error_m"] = values.median().item()
+            elif key == "chance":
+                res["chance"] = values.mean().item()
+        out[group] = res
+    return out
+
+
+def holdout_accuracy(model, loader, device, slot_log=None, ground_log=None, pointer_log=None) -> dict:
     """slot_log: a list that receives (acc, error_m) of the object tokens of every batch that has them.
-    ground_log: a dict that receives, per group, (error_m, hit, chance) of every labelled name (GroundHead)."""
+    ground_log: a dict that receives, per group, (error_m, hit, chance) of every labelled name (GroundHead).
+    pointer_log: a dict that receives, per group, the terms of every labelled name (object pointers)."""
     stats = defaultdict(lambda: [0, 0, 0.0])   # correct, rows, sum of 1 / candidates
     for batch in loader:
         images = batch["images_vggt"].to(device, non_blocking=True)
         cams = batch["images_jepa"].to(device, non_blocking=True)
-        ground = batch.get("ground") if ground_log is not None else None
+        ground = batch.get("ground") if ground_log is not None or pointer_log is not None else None
         with torch.autocast("cuda", dtype=torch.bfloat16):
             pred = model.predict_embedding(images, cams, batch["query"], slots=slots_of(model, batch),
                                            **({"ground": ground} if ground is not None else {}))
@@ -130,6 +153,16 @@ def holdout_accuracy(model, loader, device, slot_log=None, ground_log=None) -> d
                 row = batch["rows"][r]
                 for key in ("all", f"{row['source']}/{row['question_type']}", f"subset:{row.get('subset')}"):
                     ground_log[key].append((error, hit, chance))
+        if pointer_log is not None and "rows" in (model.pointer_metrics or {}):
+            m = {k: v.tolist() for k, v in model.pointer_metrics.items()
+                 if k.endswith(("_hits", "_errors")) or k in ("rows", "chance")}
+            for n, r in enumerate(m["rows"]):
+                row = batch["rows"][r]
+                name = {k: v[n] for k, v in m.items() if k != "rows"}
+                for key in ("all", f"{row['source']}/{row['question_type']}", f"subset:{row.get('subset')}",
+                            f"untrained_choice:{'right' if name['init_hits'] else 'wrong'}"):
+                    pointer_log[key].append(name)
+            pointer_log["spread"].append(float(model.pointer_metrics["spread"]))
         if slot_log is not None and getattr(model, "slot_metrics", None):
             slot_log.append((float(model.slot_metrics["acc"]), float(model.slot_metrics["error_m"])))
         per_row = [candidates_of(row) for row in batch["rows"]]
@@ -150,7 +183,8 @@ def holdout_accuracy(model, loader, device, slot_log=None, ground_log=None) -> d
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--config", required=True)
-    parser.add_argument("--checkpoint", required=True)
+    parser.add_argument("--checkpoint", required=True, help='"none": the model as built, without loading weights')
+    parser.add_argument("--modes", nargs="*", help="only these visual inputs / slot controls (default: all)")
     parser.add_argument("--holdout", help="omit to score only the --eval manifests")
     parser.add_argument("--eval", nargs="*", default=[])
     parser.add_argument("--numeric", nargs="*", default=[],
@@ -169,7 +203,7 @@ def main() -> None:
     cfg["data"]["delexicalize_eval"] = 1.0 if args.delexicalize else 0.0
     device = torch.device("cuda")
     model = build_model_from_config(cfg)
-    step = _load_checkpoint(model, args.checkpoint)
+    step = None if args.checkpoint == "none" else _load_checkpoint(model, args.checkpoint)
     model.to(device).eval()
 
     medians = {}
@@ -179,14 +213,18 @@ def main() -> None:
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     results = {"checkpoint": args.checkpoint, "step": step, "holdout": args.holdout}
-    for mode in modes_of(model):
+    for mode in args.modes or modes_of(model):
         set_mode(model, mode)
         with torch.no_grad():
             slot_log, res = [], {}
             ground_log = defaultdict(list) if getattr(model, "ground_head", None) is not None else None
+            pointer_log = defaultdict(list) if getattr(model, "pointers", None) is not None else None
             if args.holdout:
                 loader = build_loader([args.holdout], cfg, args.batch_size, train=False, limit=args.limit)
-                res["holdout"] = holdout_accuracy(model, loader, device, slot_log, ground_log)
+                res["holdout"] = holdout_accuracy(model, loader, device, slot_log, ground_log, pointer_log)
+            if pointer_log:   # object pointers: do the placeholders point at their objects
+                spread = pointer_log.pop("spread")
+                res["pointer"] = {**pointer_summary(pointer_log), "cells_averaged": sum(spread) / len(spread)}
             if ground_log:   # GroundHead: are the labelled names located
                 res["ground"] = ground_summary(ground_log)
             if slot_log:   # object tokens: does the output at the token find the position (mean over batches)

@@ -97,18 +97,23 @@ def ground_of(row: dict, objects: dict, c2w: list, fixed: bool):
     index = {j: i for i, j in enumerate(keep)}
     slots = row["slots"]   # after delexicalization the spans are those of the labels that replaced the names
     return {"spans": [slots[e["slot"]]["spans"] for e in entries],
+            # for jepa3d.pointer: which of the row's slots, and the views that show the object (add_visibility.py)
+            "slot": [e["slot"] for e in entries], "views": [e.get("views") for e in entries],
             "target": positions[[e["object"] for e in entries]], "candidates": positions[keep],
             "label": [index[e["object"]] for e in entries], "scale": scene_scale(c2w)}
 
 
 def collate_ground(items: list):
     """Per-row ground_of results (or None) -> None if the batch has no labelled name, else
-    {"row" (N,), "spans" [N], "target" (N, 3), "candidates" (N, C, 3), "valid" (N, C), "label" (N,), "scale" (N,)},
+    {"row" (N,), "spans" [N], "target" (N, 3), "candidates" (N, C, 3), "valid" (N, C), "label" (N,), "scale" (N,),
+     "slot" (N,) index among the row's slots, "views" [N] (add_visibility.py's field, None without it)},
     target and candidates divided by the scene scale."""
-    rows, spans, target, label, scale, candidates = [], [], [], [], [], []
+    rows, spans, target, label, scale, candidates, slot, views = [], [], [], [], [], [], [], []
     for i, item in enumerate(items):
         if item is None:
             continue
+        slot += item["slot"]
+        views += item["views"]
         for span, position, index in zip(item["spans"], item["target"], item["label"]):
             rows.append(i)
             spans.append(span)
@@ -124,6 +129,7 @@ def collate_ground(items: list):
     for n, c in enumerate(candidates):
         padded[n, :len(c)] = torch.from_numpy(c).float()
         valid[n, :len(c)] = True
-    return {"row": torch.tensor(rows), "spans": spans, "target": torch.tensor(np.array(target), dtype=torch.float32),
+    return {"row": torch.tensor(rows), "spans": spans, "slot": torch.tensor(slot), "views": views,
+            "target": torch.tensor(np.array(target), dtype=torch.float32),
             "candidates": padded, "valid": valid, "label": torch.tensor(label),
             "scale": torch.tensor(scale, dtype=torch.float32)}

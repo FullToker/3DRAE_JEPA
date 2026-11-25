@@ -124,7 +124,8 @@ def main() -> None:
                                                  "slot_weight": tcfg.get("slot_weight", 1.0),
                                                  "numeric_weight": tcfg.get("numeric_weight", 1.0),
                                                  "ground_weight": tcfg.get("ground_weight", 1.0),
-                                                 "name_weight": tcfg.get("name_weight", 1.0)}
+                                                 "name_weight": tcfg.get("name_weight", 1.0),
+                                                 "pointer_weight": tcfg.get("pointer_weight", 1.0)}
         else:
             trainer_cls, extra = GVJEPATrainer, {}
         trainer_cls(

@@ -54,6 +54,9 @@ def set_mode(model, mode: str) -> None:
         tokens, frames = original(model, images, cams, batch_size)
         if mode in ("shuffled", "all_shuffled"):
             tokens = tokens.roll(1, 0)
+            last = getattr(model.x_encoder, "last", None)   # object pointers read the patch features too
+            if last is not None:
+                last.update({k: last[k].roll(1, 0) for k in ("features", "valid")})
         elif mode == "zero":
             tokens = torch.zeros_like(tokens)
         return tokens, tokens.unsqueeze(1)

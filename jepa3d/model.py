@@ -36,10 +36,18 @@ tell where the object is (GroundHead): forward(..., ground=) returns
 predict_embedding() leaves the terms in self.ground_metrics. Nothing is added
 to the predictor's input.
 
+With "slots: {enabled: true, mode: pointer, layers: [2, 4]}" (jepa3d/pointer.py, dino.txt encoder only)
+every name gets a placeholder token that starts as the average of the scene tokens dino.txt matches
+to the name, plus the name's text vector. It is appended like slots_v2's tokens, but its outputs are
+part of the mean the answer is read from. After each predictor layer in `layers` the token must point
+at a scene token that shows the object (rows with "ground" labels and their "views"): forward(...,
+ground=) returns "ptr_loss" and the per-name terms, predict_embedding() leaves them in
+self.pointer_metrics.
+
 Config (YAML) layout matches fusion_gv's, with
     fusion:  x_encoder_type: 3drae, x_encoder_output_dim: 768
     rae:     feature_config, max_views; or encoder: dinotxt, pool, max_views (dino.txt patches instead of 3DRAE)
-    slots:   enabled, hidden, mode (add | tokens | text: dino.txt name vectors, jepa3d/names.py)
+    slots:   enabled, hidden, mode (add | tokens | text: dino.txt name vectors, jepa3d/names.py | pointer), layers
     name_target: enabled, hidden (jepa3d/names.py)
     numeric_head: enabled, hidden
     ground:  enabled, layer, hidden
@@ -57,6 +65,7 @@ from fusion_gv.gvjepa import FusionGVJEPA
 from fusion_gv.gvjepa_trainer import build_model_from_config as _build_fusion_gv_model
 from jepa3d.balance import KINDS
 from jepa3d.ground import GroundHead
+from jepa3d.pointer import ObjectPointers, label_cells
 from jepa3d.slots import ObjectTokens, SlotEncoder
 from jepa3d.x_encoder import ThreeDRAEXEncoder, encode_patches, unpack_cams, view_counts
 
@@ -89,8 +98,22 @@ class ThreeDRAEJEPA(FusionGVJEPA):
         self.object_tokens = None
         self.slot_metrics = None
         self._layout = None    # (row, column, count) of the object tokens of the forward in progress
+        self.pointers = None
+        self.pointer_metrics = None
+        self._ptr = None       # what the pointer tokens of the forward in progress were built from
+        self._taps = {}        # {layer: hidden states at the pointer tokens}
         slot_cfg = slot_cfg or {}
-        if slot_cfg.get("enabled") and slot_cfg.get("mode", "add") == "tokens":
+        if slot_cfg.get("enabled") and slot_cfg.get("mode") == "pointer":   # jepa3d/pointer.py
+            if rae_cfg.get("encoder") != "dinotxt":
+                raise ValueError("slots.mode: pointer needs rae.encoder: dinotxt (scene tokens laid out by cell)")
+            self.pointers = ObjectPointers(self.vis_proj.out_features, slot_cfg.get("layers", (2, 4)),
+                                           slot_cfg.get("embed", 256))
+            self.predictor.register_forward_pre_hook(self._append_tokens, with_kwargs=True)
+            self.predictor.register_forward_hook(self._remove_tokens, with_kwargs=True)
+            for k in self.pointers.layers:
+                self.predictor.layers[k - 1].register_forward_hook(partial(self._tap_pointer, k))
+            self.pred_proj.register_forward_pre_hook(self._pool_pointers)
+        elif slot_cfg.get("enabled") and slot_cfg.get("mode", "add") == "tokens":
             self.object_tokens = ObjectTokens(self.vis_proj.out_features, x_encoder.rae.encoder.hidden_size + 6,
                                               slot_cfg.get("hidden", 512))
             self.predictor.register_forward_pre_hook(self._append_tokens, with_kwargs=True)
@@ -126,8 +149,8 @@ class ThreeDRAEJEPA(FusionGVJEPA):
         self.ground_metrics = None
         self._ground_hidden = None
         if (ground_cfg or {}).get("enabled"):
-            if self.object_tokens is not None:
-                raise ValueError("ground and slots.mode: tokens cannot be combined")
+            if self.object_tokens is not None or self.pointers is not None:
+                raise ValueError("ground and slots.mode: tokens / pointer cannot be combined")
             self.ground_head = GroundHead(self.pred_proj.in_features, ground_cfg.get("hidden", 512))
             layer = self.predictor.layers[ground_cfg.get("layer", 4) - 1]
             layer.register_forward_hook(self._tap_ground)
@@ -158,7 +181,8 @@ class ThreeDRAEJEPA(FusionGVJEPA):
 
     @property
     def uses_slots(self) -> bool:
-        return self.slot_encoder is not None or self.object_tokens is not None or hasattr(self, "name_gain")
+        return (self.slot_encoder is not None or self.object_tokens is not None or self.pointers is not None
+                or hasattr(self, "name_gain"))
 
     def name_tokens(self, queries, slots) -> torch.Tensor:
         """(N, L) bool: the query tokens (as the predictor tokenizes them) that spell each slot's name."""
@@ -223,17 +247,21 @@ class ThreeDRAEJEPA(FusionGVJEPA):
         """Forward pre-hook on the predictor: x (B, S + L, h) gets the object tokens appended."""
         if self._pending is None or self._pending[1] is None:
             return None
-        queries, slots, tokens = self._pending
+        queries, slots = self._pending[:2]
         x, mask, position = args[0], kwargs["attention_mask"], kwargs["position_ids"]
         on_name = self.name_tokens(queries, slots).to(x.device)
         B, L = x.shape[0], on_name.shape[1]
         rows = slots["row"].to(x.device)
+        if self.pointers is not None:
+            tokens = self._pointer_tokens(x, mask[:, -L:].sum(1), slots, rows)
+        else:
+            tokens = self._pending[2].to(x.dtype) + self.modality_embed.weight[1].to(x.dtype)
         column = torch.zeros_like(rows)                       # index of each token among its row's tokens
         for n in range(1, len(rows)):
             column[n] = column[n - 1] + 1 if rows[n] == rows[n - 1] else 0
         count = int(column.max()) + 1
         extra = x.new_zeros(B, count, x.shape[-1])
-        extra[rows, column] = tokens.to(x.dtype) + self.modality_embed.weight[1].to(x.dtype)
+        extra[rows, column] = tokens.to(x.dtype)
         extra_mask = mask.new_zeros(B, count)
         extra_mask[rows, column] = 1
         # query token l has position id l + 1; the object token takes the id of its name's last token
@@ -254,8 +282,53 @@ class ThreeDRAEJEPA(FusionGVJEPA):
         self._token_outputs = out[:, -count:][rows, column]
         return out[:, :-count]
 
+    def _pointer_tokens(self, x, query_tokens, slots, rows) -> torch.Tensor:
+        """The placeholder tokens (N, h) of a batch's names, from the predictor's input x (B, S + L, h):
+        the encoder's patch tokens come first in x, view by view, cell by cell."""
+        last = self.x_encoder.last
+        cells = last["features"].shape[1] * last["features"].shape[2]
+        scene = x[:, :cells]
+        text = self.x_encoder.text_vectors(slots["names"]).to(x.device)
+        similarity = self.pointers.similarity(last["features"], last["valid"], text, rows)
+        tokens, spread = self.pointers.tokens(scene, similarity[0], rows, self.vis_proj(self.x_encoder.feat_proj(text)))
+        self._ptr = {"scene": scene, "similarity": similarity, "rows": rows, "spread": spread,
+                     "query_tokens": query_tokens}
+        return tokens
+
+    def _tap_pointer(self, layer, _module, _args, out):
+        if self._layout is None:
+            return
+        rows, column, count = self._layout
+        hidden = out[0] if isinstance(out, tuple) else out
+        self._taps[layer] = hidden[:, -count:][rows, column]
+
+    def _pool_pointers(self, _module, args):
+        """Forward pre-hook on pred_proj: the mean over the question tokens becomes the mean over the
+        question tokens and the row's placeholder tokens."""
+        if self._ptr is None or self._token_outputs is None:
+            return None
+        pooled, rows = args[0], self._ptr["rows"]
+        total = torch.zeros_like(pooled).index_add(0, rows, self._token_outputs.to(pooled.dtype))
+        placeholders = pooled.new_zeros(len(pooled)).index_add(0, rows, pooled.new_ones(len(rows)))
+        questions = self._ptr["query_tokens"].to(pooled.dtype)
+        return ((pooled * questions[:, None] + total) / (questions + placeholders).clamp_min(1)[:, None],)
+
+    def _pointer_loss(self, slots, ground) -> dict:
+        ptr, taps, self._ptr, self._taps = self._ptr, self._taps, None, {}
+        if ptr is None or slots is None or ground is None or not any(ground.get("views") or []):
+            return self.pointers.zero()
+        # the tokens are in the order of the batch's slots: a labelled name is its row's first token + its slot index
+        token = torch.searchsorted(slots["row"], ground["row"]) + ground["slot"]
+        last = self.x_encoder.last
+        labels = label_cells(ground, token, last["valid"], last["grid"], ptr["similarity"], last["rays"])
+        if labels is None:
+            return self.pointers.zero()
+        hidden = {k: taps[k][labels["token"]] for k in self.pointers.layers}
+        return {**self.pointers.terms(hidden, ptr["scene"], labels), "spread": ptr["spread"].mean()}
+
     def _begin(self, images, cams, queries, slots):
         self._token_outputs = None
+        self._ptr, self._taps = None, {}
         if self.object_tokens is not None and slots is not None:
             self._pending = (queries, slots, self._token_inputs(images, cams, slots))
         else:
@@ -276,6 +349,8 @@ class ThreeDRAEJEPA(FusionGVJEPA):
                 out.update({f"ground_{k}": v for k, v in self._ground_loss(queries, ground).items()})
             if self.object_tokens is not None:
                 out.update({f"slot_{k}": v for k, v in self._slot_loss(slots).items()})
+            if self.pointers is not None:
+                out.update({f"ptr_{k}": v for k, v in self._pointer_loss(slots, ground).items()})
             if self.numeric_head is not None:
                 out["numeric"] = self._numeric()
             if self.name_head is not None:
@@ -292,6 +367,8 @@ class ThreeDRAEJEPA(FusionGVJEPA):
                 self.ground_metrics = None if ground is None else self._ground_loss(queries, ground)
             if self.object_tokens is not None:
                 self.slot_metrics = None if self._token_outputs is None else self._slot_loss(slots)
+            if self.pointers is not None:
+                self.pointer_metrics = self._pointer_loss(slots, ground)
             if self.numeric_head is not None:
                 self.numeric_output = self._numeric()
             if self.name_head is not None:

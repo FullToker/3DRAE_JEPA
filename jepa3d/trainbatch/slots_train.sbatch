@@ -23,6 +23,10 @@
 #   MODE=eval     eval only
 #       sbatch --gres=gpu:1 --cpus-per-task=10 --mem=96G --job-name=slots_eval \
 #           --export=ALL,MODE=eval jepa3d/trainbatch/slots_train.sbatch
+#   MODE=baseline objptr_v1: the model as built, no weights loaded -> results/eval_untrained.json
+#                 (how often dino.txt's own choice of cell is on the object)
+#       sbatch --gres=gpu:1 --cpus-per-task=10 --mem=96G --job-name=objptr_baseline \
+#           --export=ALL,MODE=baseline,NAME=objptr_v1 jepa3d/trainbatch/slots_train.sbatch
 #   MODE=diagnose do the trained slot vectors depend on the positions, does the
 #                 prediction depend on them (jepa3d/tools/diagnose_slot_encoder.py)
 #       sbatch --gres=gpu:1 --cpus-per-task=10 --mem=96G --job-name=slots_diagnose \
@@ -104,6 +108,10 @@ train)
     if [ -n "${DELEX_EVAL:-}" ]; then
         run_eval "$EXP/ckpt/final.pt" "$EXP/results/eval_final_delex.json" --delexicalize
     fi
+    ;;
+baseline)   # object pointers before any training: where does the untrained choice land (1 GPU, holdout only)
+    $SIF python3 jepa3d/tools/eval_holdout.py --config "$CONFIG" --checkpoint none --modes real shuffled \
+        --holdout "$DATA/holdout_f8.jsonl" --output "$EXP/results/eval_untrained.json"
     ;;
 eval)
     CHECKPOINT=${CHECKPOINT:-$EXP/ckpt/final.pt}

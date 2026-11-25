@@ -30,6 +30,11 @@ metres (it sees a detached output).
 ground (models with a GroundHead, jepa3d/ground.py): the head's choice and
 regression terms on the names with a true position; ground_loss, ground_acc
 and ground_error_m (median, metres) go to the same log.
+
+pointer (models with object pointers, jepa3d/pointer.py): pointer_weight times
+the pointing loss, summed over the supervised layers. Per layer k the log gets
+ptr_l<k>_loss, ptr_l<k>_acc (best cell on the object) and ptr_l<k>_error_m
+(mean), with ptr_init_acc / ptr_raw_acc for the untrained choice.
 """
 
 import json
@@ -84,15 +89,32 @@ def hard_logits(pred, target, neg, owner, slot, temperature: float):
     return torch.cat([pos[:, None], table], dim=1)[rows], rows
 
 
+def pointer_sums(terms: dict) -> dict:
+    """The model's pointer terms of one forward -> sums over its labelled names, to be divided by "ptr_names"."""
+    if "rows" not in terms:   # no labelled, visible name in the batch
+        return {}
+    out = {"ptr_names": float(len(terms["rows"]))}
+    for key, value in terms.items():
+        if key.endswith("_hits"):
+            out[f"ptr_{key[:-5]}_acc"] = float(value.sum())
+        elif key.endswith("_errors"):
+            out[f"ptr_{key[:-7]}_error_m"] = float(value.sum())
+        elif key.endswith("_loss"):
+            out[f"ptr_{key}"] = float(value.sum())
+    return out
+
+
 class HardNegTrainer(GVJEPATrainer):
     def __init__(self, *args, hard_weight: float = 1.0, slot_weight: float = 1.0, numeric_weight: float = 1.0,
-                 ground_weight: float = 1.0, name_weight: float = 1.0, **kwargs):
+                 ground_weight: float = 1.0, name_weight: float = 1.0, pointer_weight: float = 1.0, **kwargs):
         super().__init__(*args, **kwargs)
         self.hard_weight = hard_weight
         self.slot_weight = slot_weight
         self.numeric_weight = numeric_weight
         self.ground_weight = ground_weight
         self.name_weight = name_weight
+        self.pointer_weight = pointer_weight
+        self._ptr = None      # the model's pointer terms of the last forward
         self._name = None
         self._ground = None   # the model's ground terms of the last forward
         self._numeric = None   # the model's numeric head output of the last forward
@@ -111,6 +133,7 @@ class HardNegTrainer(GVJEPATrainer):
                     ground=batch.get("ground"))
         self._ground = {k[7:]: v for k, v in out.items() if k.startswith("ground_")} or None
         B = len(negatives)
+        self._ptr = {k[4:]: v for k, v in out.items() if k.startswith("ptr_")} or None
         self._slot = {k[5:]: v for k, v in out.items() if k.startswith("slot_")} or None
         self._numeric = out.get("numeric")
         self._name = None
@@ -182,6 +205,10 @@ class HardNegTrainer(GVJEPATrainer):
                 self._sums["ground_names"] += names
                 for key in ("loss", "acc", "error_m"):
                     self._sums[f"ground_{key}"] += float(self._ground[key]) * names
+            if self._ptr is not None:
+                loss = loss + self.pointer_weight * self._ptr["loss"]
+                for key, value in pointer_sums(self._ptr).items():
+                    self._sums[key] += value
             loss = loss / self.grad_accum_steps
 
         rows = 0 if logits is None else len(logits)
@@ -201,7 +228,9 @@ class HardNegTrainer(GVJEPATrainer):
                        **({k: self._sums[k] / max(self._sums["numeric_rows"], 1) for k in ("numeric_loss", "numeric_mra")}
                           if self._numeric is not None else {}),
                        **({"name_acc": self._sums["name_acc"] / max(self._sums["name_rows"], 1)}
-                          if self._name is not None else {})}, "train")
+                          if self._name is not None else {}),
+                       **{k: v / max(self._sums["ptr_names"], 1) for k, v in self._sums.items()
+                          if k.startswith("ptr_") and k != "ptr_names"}}, "train")
             self._sums.clear()
         return loss, infonce.item()
 
@@ -222,7 +251,7 @@ class HardNegTrainer(GVJEPATrainer):
         device = self.accelerator.device
         model = self.accelerator.unwrap_model(self.model)
         model.eval()
-        losses, hits = [], defaultdict(list)
+        losses, hits, sums = [], defaultdict(list), defaultdict(float)
         for i, batch in enumerate(self.val_loader):
             if i >= self.val_max_batches:
                 break
@@ -239,6 +268,9 @@ class HardNegTrainer(GVJEPATrainer):
             if self._ground is not None and len(self._ground["errors"]):
                 hits["val_ground_acc"] += self._ground["hits"].tolist()
                 hits["val_ground_error_m"] += self._ground["errors"].tolist()
+            if self._ptr is not None:
+                for key, value in pointer_sums(self._ptr).items():
+                    sums[key] += value
             if self._numeric is not None:
                 _, mra, count = self._numeric_terms(batch, torch.ones(len(batch["query"]), device=device))
                 hits["val_numeric_mra"] += [mra] * count
@@ -248,5 +280,7 @@ class HardNegTrainer(GVJEPATrainer):
                 hits["val_hard_acc"].append(hit)
                 hits[f"val_hard_acc_type/{batch['rows'][r].get('question_type')}"].append(hit)
         model.train()
-        self._log({"step": self._steps, **{k: sum(v) / len(v) for k, v in sorted(hits.items()) if v}}, "val")
+        self._log({"step": self._steps, **{k: sum(v) / len(v) for k, v in sorted(hits.items()) if v},
+                   **{f"val_{k}": v / max(sums["ptr_names"], 1) for k, v in sorted(sums.items()) if k != "ptr_names"}},
+                  "val")
         return sum(losses) / len(losses) if losses else float("nan")
