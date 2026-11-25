@@ -33,7 +33,7 @@ srun singularity exec --env VJEPA_ROOT=$VJEPA --bind /glob/g01-cache:/glob/g01-c
 if [ -z "${LIMIT:-}" ]; then
     ln -sf "$ROOT/$SRC/scene_objects.json" "$OUT/scene_objects.json"
     for split in test debiased; do
-        ln -sf "$(readlink -f "$SRC/vsibench_${split}_posed_f8.jsonl")" "$OUT/vsibench_${split}_posed_f8.jsonl"
+        ln -sf "$ROOT/experiments/slots_v2/data/vsibench_${split}_posed_f8.jsonl" "$OUT/vsibench_${split}_posed_f8.jsonl"
     done
 fi
 echo "[done] $(date)"
