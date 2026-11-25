@@ -27,6 +27,8 @@
 #       sbatch --gres=gpu:3 --cpus-per-task=30 --mem=240G --job-name=e1_a \
 #           --export=ALL,MODE=train,ARM=a,NUM_GPUS=3 jepa3d/trainbatch/e1_oracle.sbatch
 #   MODE=eval     eval only
+#   MODE=probe    jepa3d/tools/oracle_probe.py: a small MLP on the positions arm B is handed (minutes)
+#       sbatch --job-name=e1_probe --export=ALL,MODE=probe jepa3d/trainbatch/e1_oracle.sbatch
 #
 # Eval (jepa3d/tools/eval_holdout.py --delexicalize, holdout only: VSI-Bench scenes
 # have no object positions): real / shuffled / zero scene tokens, positions of
@@ -96,6 +98,9 @@ train)
 eval)
     CHECKPOINT=${CHECKPOINT:-$RUN/ckpt/final.pt}
     run_eval "$CHECKPOINT" "$RUN/results/eval_$(basename "$CHECKPOINT" .pt).json"
+    ;;
+probe)
+    $SIF python3 jepa3d/tools/oracle_probe.py --config "$CONFIG" --output "$EXP/probe/results/probe.json"
     ;;
 *)
     echo "unknown MODE=$MODE" >&2
