@@ -129,7 +129,7 @@ def main() -> None:
     parser.add_argument("--data", required=True, help="ground_v1's data folder (read only)")
     parser.add_argument("--out", required=True)
     parser.add_argument("--train-variants", type=int, default=3)
-    parser.add_argument("--holdout-variants", type=int, default=1)
+    parser.add_argument("--holdout-variants", type=int, default=5)
     args = parser.parse_args()
     data, out = Path(args.data), Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
