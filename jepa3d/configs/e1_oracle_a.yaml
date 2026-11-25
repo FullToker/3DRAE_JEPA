@@ -1,0 +1,114 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# e1_oracle_a: can the predictor answer a direction question from true positions?
+# ──────────────────────────────────────────────────────────────────────────────
+#
+# Why: ten runs answer VSI-Bench the same with the real, a shuffled or no scene.
+# Three causes are still mixed up: the names are not found in the scene, the
+# predictor cannot compute a spatial relation, or the sentence-embedding target
+# cannot express it. Here the first cause is removed: every object the question
+# names gets a token with its true centre (jepa3d/oracle.py). Nothing else is
+# added and no loss sits on that token.
+#
+# Data (jepa3d/tools/make_oracle_manifest.py, experiments/e1_oracle/data):
+# VSI-590K direction questions, all delexicalized ("object A"); "real" rows keep
+# the dataset's objects and answer, "synth" rows point the three names at random
+# objects of the scene and recompute the answer from the centres. All rows share
+# one answer_key, so the in-batch InfoNCE term is masked out and only the choice
+# among the question's own answers trains the model.
+#
+# Arm A: positions next to the 1024 real 3DRAE scene tokens, as in hardneg_v1.
+# Shows whether the scene tokens get in the way of the position tokens.
+#
+# Pass line, fixed before the run: holdout direction >= 60 % and at least 20
+# points above "slots_permuted" (each name gets another name's position).
+#
+# Outputs: experiments/e1_oracle/a/ in the main checkout (MAIN_ROOT); the code
+# runs from its own worktree (branch e1_oracle). Run: jepa3d/trainbatch/e1_oracle.sbatch
+# ──────────────────────────────────────────────────────────────────────────────
+
+init_vljepa_ckpt: ${VJEPA_ROOT}/ckpts/open_vljepa/best.pt
+
+rae:
+  feature_config: configs/models/dino2_feature.yaml   # relative to this repo
+  max_views: 32
+
+fusion:
+  x_encoder_type: 3drae
+  x_encoder_output_dim: 768
+
+slots:
+  enabled: true
+  mode: oracle    # one token per labelled name, built from its true centre
+  hidden: 512
+
+model:
+  query_model_name: meta-llama/Llama-3.2-1B
+  predictor_llama_layers: 8
+  max_query_tokens: 256
+  y_encoder_name: google/embeddinggemma-300m
+  max_target_tokens: 256
+  shared_embed_dim: 1536
+  y_encoder_lr_multiplier: 0.05
+  hf_cache_dir: ${VJEPA_ROOT}/ckpts
+
+data:
+  train_manifests:
+    - ${MAIN_ROOT}/experiments/e1_oracle/data/train_f8.jsonl
+  val_manifests:
+    - ${MAIN_ROOT}/experiments/e1_oracle/data/holdout_f8.jsonl
+  ground_objects: ${MAIN_ROOT}/experiments/ground_v1/data/scene_objects.json
+  oracle_slots: true        # the batch's slots are the true centres of the labelled names
+  delexicalize: 1.0         # every training row
+  delexicalize_eval: 1.0    # and every validation row
+  mask_key: answer_key      # one key for all rows: no in-batch negatives
+  num_negatives: 3
+  image_size: [224, 308]
+  num_workers: 8
+  val_num_workers: 2
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 2
+
+train:
+  seed: 42
+  device: cuda
+  precision: bf16
+  output_dir: ${MAIN_ROOT}/experiments/e1_oracle/a/ckpt
+
+  batch_size: 32
+  # 1, not 4 as in the earlier runs: accumulation adds no negatives, it only
+  # divides the number of optimizer updates.
+  gradient_accumulation_steps: 1
+  # 3 GPUs: one step = one update of 96 rows. ~250k rows = 2,600 steps per pass;
+  # two passes.
+  max_steps: 5200
+  hard_weight: 1.0
+
+  clip_grad_norm: 1.0
+  log_every: 50
+  save_every: 0
+  val_every: 1000
+  val_max_batches: 60
+  val_batch_size: 32
+
+  learning_rate: 1.0e-4
+  min_lr: 1.0e-5
+  warmup_steps: 200
+  weight_decay: 0.01
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-8
+  scheduler: cosine
+  temperature: 0.07
+
+mlflow:
+  enabled: true
+  env_file: ${VJEPA_ROOT}/.env/mlflow.env
+  tracking_uri: "file:///glob/g01-cache/pf/Yushuo/mlruns"
+  experiment_name: vljepa_sft_from_ckpt
+  run_name: e1_oracle_a
+  log_params: true
+  tags:
+    project: vljepa-3drae
+    variant: e1-oracle-a
+    data: vsi590k-direction-true-centres

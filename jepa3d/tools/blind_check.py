@@ -32,6 +32,7 @@ from fusion_gv.gvjepa_trainer import group_ids_tensor
 from fusion_gv.infer_gvjepa import _candidates, _load_checkpoint, _score_candidate_batch, _target
 from jepa3d.data import build_loader
 from jepa3d.model import build_model_from_config
+from jepa3d.oracle import permute_within_rows
 from jepa3d.train import load_config
 
 MODES = ("real", "shuffled", "zero")
@@ -40,10 +41,14 @@ MODES = ("real", "shuffled", "zero")
 #   slots_none     real scene tokens; no slots
 #   all_shuffled   shuffled scene tokens and swapped slots: nothing of the row's own images is left
 SLOT_MODES = ("slots_swapped", "slots_none", "all_shuffled")
+# Only for models with true positions (jepa3d/oracle.py): every name gets the position of another name
+# of its own question.
+ORACLE_MODES = ("slots_permuted",)
 
 
 def modes_of(model) -> tuple:
-    return MODES + (SLOT_MODES if model.uses_slots else ())
+    oracle = getattr(model, "oracle_tokens", None) is not None
+    return MODES + (SLOT_MODES if model.uses_slots else ()) + (ORACLE_MODES if oracle else ())
 
 
 def set_mode(model, mode: str) -> None:
@@ -69,6 +74,8 @@ def slots_of(model, batch):
     slots = batch.get("slots")
     if slots is None or model._slot_mode == "slots_none":
         return None
+    if model._slot_mode == "slots_permuted":
+        return permute_within_rows(slots)
     if model._slot_mode in ("slots_swapped", "all_shuffled"):
         shift = max(1, len(slots["row"]) // 2)
         slots = {**slots, **{k: slots[k].roll(shift, 0) for k in ("pos", "conf", "patch", "scale") if k in slots}}

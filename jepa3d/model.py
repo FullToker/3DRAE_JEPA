@@ -47,7 +47,9 @@ self.pointer_metrics.
 Config (YAML) layout matches fusion_gv's, with
     fusion:  x_encoder_type: 3drae, x_encoder_output_dim: 768
     rae:     feature_config, max_views; or encoder: dinotxt, pool, max_views (dino.txt patches instead of 3DRAE)
-    slots:   enabled, hidden, mode (add | tokens | text: dino.txt name vectors, jepa3d/names.py | pointer), layers
+    slots:   enabled, hidden, mode (add | tokens | text: dino.txt name vectors, jepa3d/names.py | pointer
+             | oracle: true positions, jepa3d/oracle.py), layers
+    rae:     blind: true gives the predictor one all-zero scene token and never runs the encoder (E1, arm B)
     name_target: enabled, hidden (jepa3d/names.py)
     numeric_head: enabled, hidden
     ground:  enabled, layer, hidden
@@ -65,6 +67,7 @@ from fusion_gv.gvjepa import FusionGVJEPA
 from fusion_gv.gvjepa_trainer import build_model_from_config as _build_fusion_gv_model
 from jepa3d.balance import KINDS
 from jepa3d.ground import GroundHead
+from jepa3d.oracle import OracleTokens
 from jepa3d.pointer import ObjectPointers, label_cells
 from jepa3d.slots import ObjectTokens, SlotEncoder
 from jepa3d.x_encoder import ThreeDRAEXEncoder, encode_patches, unpack_cams, view_counts
@@ -102,8 +105,14 @@ class ThreeDRAEJEPA(FusionGVJEPA):
         self.pointer_metrics = None
         self._ptr = None       # what the pointer tokens of the forward in progress were built from
         self._taps = {}        # {layer: hidden states at the pointer tokens}
+        self.oracle_tokens = None
+        self.blind = bool(rae_cfg.get("blind"))
         slot_cfg = slot_cfg or {}
-        if slot_cfg.get("enabled") and slot_cfg.get("mode") == "pointer":   # jepa3d/pointer.py
+        if slot_cfg.get("enabled") and slot_cfg.get("mode") == "oracle":   # jepa3d/oracle.py
+            self.oracle_tokens = OracleTokens(self.vis_proj.out_features, slot_cfg.get("hidden", 512))
+            self.predictor.register_forward_pre_hook(self._append_tokens, with_kwargs=True)
+            self.predictor.register_forward_hook(self._remove_tokens, with_kwargs=True)
+        elif slot_cfg.get("enabled") and slot_cfg.get("mode") == "pointer":   # jepa3d/pointer.py
             if rae_cfg.get("encoder") != "dinotxt":
                 raise ValueError("slots.mode: pointer needs rae.encoder: dinotxt (scene tokens laid out by cell)")
             self.pointers = ObjectPointers(self.vis_proj.out_features, slot_cfg.get("layers", (2, 4)),
@@ -182,7 +191,7 @@ class ThreeDRAEJEPA(FusionGVJEPA):
     @property
     def uses_slots(self) -> bool:
         return (self.slot_encoder is not None or self.object_tokens is not None or self.pointers is not None
-                or hasattr(self, "name_gain"))
+                or self.oracle_tokens is not None or hasattr(self, "name_gain"))
 
     def name_tokens(self, queries, slots) -> torch.Tensor:
         """(N, L) bool: the query tokens (as the predictor tokenizes them) that spell each slot's name."""
@@ -254,6 +263,8 @@ class ThreeDRAEJEPA(FusionGVJEPA):
         rows = slots["row"].to(x.device)
         if self.pointers is not None:
             tokens = self._pointer_tokens(x, mask[:, -L:].sum(1), slots, rows)
+        elif self.oracle_tokens is not None:
+            tokens = self.oracle_tokens(slots["pos"].to(x.device))
         else:
             tokens = self._pending[2].to(x.dtype) + self.modality_embed.weight[1].to(x.dtype)
         column = torch.zeros_like(rows)                       # index of each token among its row's tokens
@@ -384,6 +395,9 @@ class ThreeDRAEJEPA(FusionGVJEPA):
         means FusionGVJEPA tags every token with the same frame_embed row and
         frame shuffling is a no-op.
         """
+        if self.blind:
+            tokens = images.new_zeros(images.shape[0], 1, self.x_encoder.dim)
+            return tokens, tokens.unsqueeze(1)
         with torch.profiler.record_function("x_encoder"):
             tokens = self.x_encoder(images, cams)
         return tokens, tokens.unsqueeze(1)

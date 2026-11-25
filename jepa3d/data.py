@@ -27,6 +27,7 @@ from fusion_gv.gvjepa_trainer import GVJEPADataset
 from jepa3d.balance import KINDS, answer_class, numeric_target, type_key
 from jepa3d.delex import delexicalize
 from jepa3d.ground import collate_ground, ground_of, load_objects
+from jepa3d.oracle import oracle_slots
 from jepa3d.slots import collate_slots
 from jepa3d.x_encoder import CAM_DIM
 from utils.camera import resize_intrinsics
@@ -111,12 +112,16 @@ def collate_numeric(rows) -> dict:
             "value": torch.tensor([t[1] if t else 1.0 for t in targets], dtype=torch.float32)}
 
 
-def spar3d_collate(batch: List[Dict[str, Any]], image_size=(224, 308)) -> Dict[str, Any]:
-    V = max(len(s["image_paths"]) for s in batch)
+def spar3d_collate(batch: List[Dict[str, Any]], image_size=(224, 308), oracle: bool = False,
+                   load_images: bool = True) -> Dict[str, Any]:
+    """oracle: the batch's "slots" are the true positions of its labelled names (jepa3d/oracle.py).
+    load_images=False: one black view per row, no file is opened (models with rae.blind)."""
+    V = max(len(s["image_paths"]) for s in batch) if load_images else 1
     images = torch.zeros(len(batch), V, 3, *image_size)
     cams = torch.zeros(len(batch), V, CAM_DIM)
     cams[..., 9:] = torch.eye(4).flatten()   # padded slots: K = 0, w2c = I
-    for i, sample in enumerate(batch):
+    ground = collate_ground([s.get("ground") for s in batch])
+    for i, sample in enumerate(batch if load_images else []):
         imgs, K, w2c = load_views(sample, image_size)
         n = len(imgs)
         images[i, :n] = imgs.clamp(0, 1)
@@ -136,9 +141,9 @@ def spar3d_collate(batch: List[Dict[str, Any]], image_size=(224, 308)) -> Dict[s
         # numeric answers (jepa3d/balance.py): kind index into KINDS (-1: not numeric) and the value
         "numeric": collate_numeric([s["row"] for s in batch]),
         # object slots of the questions (jepa3d/slots.py); None when the manifest has none
-        "slots": collate_slots([s["row"] for s in batch]),
+        "slots": oracle_slots(ground) if oracle else collate_slots([s["row"] for s in batch]),
         # true positions of the named objects (jepa3d/ground.py); None when no row of the batch has a label
-        "ground": collate_ground([s.get("ground") for s in batch]),
+        "ground": ground,
     }
 
 
@@ -164,7 +169,9 @@ def build_loader(manifests, cfg: dict, batch_size: int, train: bool = True, limi
         "drop_last": train,
         "num_workers": num_workers,
         "pin_memory": dcfg.get("pin_memory", True),
-        "collate_fn": functools.partial(spar3d_collate, image_size=tuple(dcfg["image_size"])),
+        "collate_fn": functools.partial(spar3d_collate, image_size=tuple(dcfg["image_size"]),
+                                        oracle=dcfg.get("oracle_slots", False),
+                                        load_images=dcfg.get("load_images", True)),
     }
     if num_workers > 0 and train:
         kwargs["persistent_workers"] = dcfg.get("persistent_workers", True)
