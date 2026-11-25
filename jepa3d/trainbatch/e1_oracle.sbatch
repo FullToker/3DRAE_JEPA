@@ -26,6 +26,8 @@
 #       arm A (positions + 3DRAE scene tokens, 3 GPUs):
 #       sbatch --gres=gpu:3 --cpus-per-task=30 --mem=240G --job-name=e1_a \
 #           --export=ALL,MODE=train,ARM=a,NUM_GPUS=3 jepa3d/trainbatch/e1_oracle.sbatch
+#       arm D (arm B + direction classification head, 1 GPU):
+#       sbatch --job-name=e1_d --export=ALL,MODE=train,ARM=d jepa3d/trainbatch/e1_oracle.sbatch
 #   MODE=eval     eval only
 #   MODE=probe    jepa3d/tools/oracle_probe.py: a small MLP on the positions arm B is handed (minutes)
 #       sbatch --job-name=e1_probe --export=ALL,MODE=probe jepa3d/trainbatch/e1_oracle.sbatch

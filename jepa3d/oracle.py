@@ -17,6 +17,7 @@ that script's imports.
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from jepa3d.slots import fourier
 
@@ -54,6 +55,51 @@ def permute_within_rows(slots: dict) -> dict:
         mine = (rows == b).nonzero().flatten()
         pos[mine] = slots["pos"][mine.roll(1)]
     return {**slots, "pos": pos}
+
+
+def flip_within_rows(slots: dict) -> dict:
+    """Control: the first two names of every question (where I stand, what I face) trade positions.
+    Unlike the cyclic permute_within_rows, this turns left into right: a model that reads the positions
+    must fall below the answer prior, not stay on it."""
+    rows, pos = slots["row"], slots["pos"].clone()
+    for b in rows.unique().tolist():
+        mine = (rows == b).nonzero().flatten()
+        if len(mine) >= 2:
+            pos[mine[:2]] = slots["pos"][mine[:2].flip(0)]
+    return {**slots, "pos": pos}
+
+
+ANSWERS = ("left", "right", "back", "front-left", "front-right", "back-left", "back-right")
+
+
+class DirectionHead(nn.Module):
+    """Arm D: the direction as a class, read from the pooled predictor output (the input of pred_proj).
+    Tells the predictor apart from the sentence-embedding target: same input, same predictor, but a
+    target in which left and right are different classes instead of two sentences one word apart."""
+
+    def __init__(self, dim: int, hidden: int = 512):
+        super().__init__()
+        self.net = nn.Sequential(nn.LayerNorm(dim), nn.Linear(dim, hidden), nn.GELU(), nn.Linear(hidden, len(ANSWERS)))
+
+    def forward(self, pooled: torch.Tensor) -> torch.Tensor:
+        return self.net(pooled.float())
+
+
+def direction_terms(logits: torch.Tensor, rows: list) -> dict:
+    """logits (B, 7), the batch's manifest rows -> {"loss", "hits" [n]} over the rows with a direction answer;
+    the classes that are not among a row's options are masked."""
+    keep, labels, allowed = [], [], []
+    for i, row in enumerate(rows):
+        options = list(dict.fromkeys(row.get("options") or []))
+        if row.get("target_short") in ANSWERS and options and all(o in ANSWERS for o in options):
+            keep.append(i)
+            labels.append(ANSWERS.index(row["target_short"]))
+            allowed.append([a in options for a in ANSWERS])
+    if not keep:
+        return {"loss": logits.sum() * 0.0, "hits": []}
+    labels = torch.tensor(labels, device=logits.device)
+    masked = logits[keep].float().masked_fill(~torch.tensor(allowed, device=logits.device), float("-inf"))
+    return {"loss": F.cross_entropy(masked, labels), "hits": (masked.argmax(1) == labels).tolist()}
 
 
 def azimuth(stand, face, target, up) -> float:

@@ -45,6 +45,7 @@ from jepa3d.balance import KINDS
 from jepa3d.names import name_options, name_terms
 from jepa3d.data import build_loader
 from jepa3d.model import build_model_from_config
+from jepa3d.oracle import ANSWERS, direction_terms
 from jepa3d.tools.blind_check import accuracy, modes_of, set_mode, slots_of
 from jepa3d.train import load_config
 from jepa3d.trainer import mean_relative_accuracy
@@ -76,6 +77,23 @@ def name_accuracy(model, loader, device) -> dict:
         for r, hit in zip(terms["rows"], terms["hits"]):
             row = batch["rows"][r]
             for key in ("all", f"type/{row.get('type') or row.get('question_type')}"):
+                stats[key][0] += int(hit)
+                stats[key][1] += 1
+    return {k: {"acc": c / n, "rows": n} for k, (c, n) in sorted(stats.items())}
+
+
+def direction_accuracy(model, loader, device) -> dict:
+    """E1, arm D: the direction head's answer among the row's own options: {source / options: accuracy}."""
+    stats = defaultdict(lambda: [0, 0])
+    for batch in loader:
+        images = batch["images_vggt"].to(device, non_blocking=True)
+        cams = batch["images_jepa"].to(device, non_blocking=True)
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            model.predict_embedding(images, cams, batch["query"], slots=slots_of(model, batch))
+        kept = [r for r in batch["rows"] if r.get("target_short") in ANSWERS and r.get("options")
+                and all(o in ANSWERS for o in r["options"])]
+        for row, hit in zip(kept, direction_terms(model.direction_output, batch["rows"])["hits"]):
+            for key in ("all", f"source/{row.get('source')}", f"options/{len(set(row['options']))}"):
                 stats[key][0] += int(hit)
                 stats[key][1] += 1
     return {k: {"acc": c / n, "rows": n} for k, (c, n) in sorted(stats.items())}
@@ -236,6 +254,9 @@ def main() -> None:
             for path in ([args.holdout] if args.holdout else []) + args.eval if model.name_head is not None else []:
                 loader = build_loader([path], cfg, args.batch_size, train=False, limit=args.limit)
                 res.setdefault("name_head", {})[Path(path).stem] = name_accuracy(model, loader, device)
+            if getattr(model, "direction_head", None) is not None and args.holdout:
+                loader = build_loader([args.holdout], cfg, args.batch_size, train=False, limit=args.limit)
+                res["direction_head"] = direction_accuracy(model, loader, device)
             for path in args.numeric if model.numeric_head is not None else []:
                 loader = build_loader([path], cfg, args.batch_size, train=False, limit=args.limit)
                 res[Path(path).stem] = numeric_accuracy(model, loader, device, medians)

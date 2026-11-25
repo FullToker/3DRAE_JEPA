@@ -67,7 +67,7 @@ from fusion_gv.gvjepa import FusionGVJEPA
 from fusion_gv.gvjepa_trainer import build_model_from_config as _build_fusion_gv_model
 from jepa3d.balance import KINDS
 from jepa3d.ground import GroundHead
-from jepa3d.oracle import OracleTokens
+from jepa3d.oracle import DirectionHead, OracleTokens
 from jepa3d.pointer import ObjectPointers, label_cells
 from jepa3d.slots import ObjectTokens, SlotEncoder
 from jepa3d.x_encoder import ThreeDRAEXEncoder, encode_patches, unpack_cams, view_counts
@@ -75,7 +75,8 @@ from jepa3d.x_encoder import ThreeDRAEXEncoder, encode_patches, unpack_cams, vie
 
 class ThreeDRAEJEPA(FusionGVJEPA):
     def __init__(self, config, rae_cfg: dict | None = None, slot_cfg: dict | None = None,
-                 numeric_cfg: dict | None = None, ground_cfg: dict | None = None, name_cfg: dict | None = None):
+                 numeric_cfg: dict | None = None, ground_cfg: dict | None = None, name_cfg: dict | None = None,
+                 direction_cfg: dict | None = None):
         rae_cfg = rae_cfg or {}
         if rae_cfg.get("encoder", "3drae") == "dinotxt":   # baseline without 3DRAE (jepa3d/x_encoder_dinotxt.py)
             from jepa3d.x_encoder_dinotxt import DinoTxtXEncoder
@@ -152,6 +153,13 @@ class ThreeDRAEJEPA(FusionGVJEPA):
                 torch.nn.LayerNorm(self.pred_proj.in_features), torch.nn.Linear(self.pred_proj.in_features, hidden),
                 torch.nn.GELU(), torch.nn.Linear(hidden, width))
             if self.numeric_head is None:
+                self.pred_proj.register_forward_pre_hook(lambda _m, args: setattr(self, "_pooled", args[0]))
+
+        self.direction_head = None
+        self.direction_output = None
+        if (direction_cfg or {}).get("enabled"):   # E1, arm D (jepa3d/oracle.py)
+            self.direction_head = DirectionHead(self.pred_proj.in_features, direction_cfg.get("hidden", 512))
+            if self.numeric_head is None and self.name_head is None:
                 self.pred_proj.register_forward_pre_hook(lambda _m, args: setattr(self, "_pooled", args[0]))
 
         self.ground_head = None
@@ -366,6 +374,8 @@ class ThreeDRAEJEPA(FusionGVJEPA):
                 out["numeric"] = self._numeric()
             if self.name_head is not None:
                 out["name_pred"] = self.name_head(self._pooled.float())
+            if self.direction_head is not None:
+                out["direction"] = self.direction_head(self._pooled)
             return out
         finally:
             self._pending = None
@@ -384,6 +394,8 @@ class ThreeDRAEJEPA(FusionGVJEPA):
                 self.numeric_output = self._numeric()
             if self.name_head is not None:
                 self.name_output = self.name_head(self._pooled.float())
+            if self.direction_head is not None:
+                self.direction_output = self.direction_head(self._pooled)
             return pred
         finally:
             self._pending = None
@@ -408,6 +420,6 @@ def build_model_from_config(cfg: dict) -> ThreeDRAEJEPA:
     cfg = {**cfg, "fusion": {"jepa_ckpt": None, **cfg["fusion"]}}
     factory = partial(ThreeDRAEJEPA, rae_cfg=cfg.get("rae"), slot_cfg=cfg.get("slots"),
                       numeric_cfg=cfg.get("numeric_head"), ground_cfg=cfg.get("ground"),
-                      name_cfg=cfg.get("name_target"))
+                      name_cfg=cfg.get("name_target"), direction_cfg=cfg.get("direction_head"))
     with mock.patch.object(gvjepa, "FusionGVJEPA", factory):
         return _build_fusion_gv_model(cfg)

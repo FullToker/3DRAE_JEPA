@@ -46,6 +46,7 @@ import torch.nn.functional as F
 
 from jepa3d.paths import expand_paths  # noqa: F401  (sets sys.path for fusion_gv)
 from jepa3d.names import name_terms
+from jepa3d.oracle import direction_terms
 from fusion_gv.gvjepa_trainer import (
     GVJEPATrainer,
     _world_size,
@@ -106,7 +107,8 @@ def pointer_sums(terms: dict) -> dict:
 
 class HardNegTrainer(GVJEPATrainer):
     def __init__(self, *args, hard_weight: float = 1.0, slot_weight: float = 1.0, numeric_weight: float = 1.0,
-                 ground_weight: float = 1.0, name_weight: float = 1.0, pointer_weight: float = 1.0, **kwargs):
+                 ground_weight: float = 1.0, name_weight: float = 1.0, pointer_weight: float = 1.0,
+                 direction_weight: float = 1.0, **kwargs):
         super().__init__(*args, **kwargs)
         self.hard_weight = hard_weight
         self.slot_weight = slot_weight
@@ -114,6 +116,8 @@ class HardNegTrainer(GVJEPATrainer):
         self.ground_weight = ground_weight
         self.name_weight = name_weight
         self.pointer_weight = pointer_weight
+        self.direction_weight = direction_weight
+        self._direction = None   # the direction head's terms of the last forward (jepa3d/oracle.py)
         self._ptr = None      # the model's pointer terms of the last forward
         self._name = None
         self._ground = None   # the model's ground terms of the last forward
@@ -136,6 +140,7 @@ class HardNegTrainer(GVJEPATrainer):
         self._ptr = {k[4:]: v for k, v in out.items() if k.startswith("ptr_")} or None
         self._slot = {k[5:]: v for k, v in out.items() if k.startswith("slot_")} or None
         self._numeric = out.get("numeric")
+        self._direction = direction_terms(out["direction"], batch["rows"]) if "direction" in out else None
         self._name = None
         if "name_pred" in out:   # second target for object-name answers (jepa3d/names.py)
             self._name = name_terms(self.accelerator.unwrap_model(model).x_encoder, out["name_pred"], batch["rows"])
@@ -191,6 +196,11 @@ class HardNegTrainer(GVJEPATrainer):
                 self._sums["numeric_loss"] += numeric.item() * count
                 self._sums["numeric_mra"] += mra * count
                 self._sums["numeric_rows"] += count
+            if self._direction is not None:
+                loss = loss + self.direction_weight * self._direction["loss"]
+                self._sums["direction_loss"] += self._direction["loss"].item() * len(self._direction["hits"])
+                self._sums["direction_acc"] += sum(self._direction["hits"])
+                self._sums["direction_rows"] += len(self._direction["hits"])
             if self._name is not None:
                 loss = loss + self.name_weight * self._name["loss"]
                 self._sums["name_acc"] += sum(self._name["hits"])
@@ -229,6 +239,8 @@ class HardNegTrainer(GVJEPATrainer):
                           if self._numeric is not None else {}),
                        **({"name_acc": self._sums["name_acc"] / max(self._sums["name_rows"], 1)}
                           if self._name is not None else {}),
+                       **({k: self._sums[k] / max(self._sums["direction_rows"], 1)
+                           for k in ("direction_loss", "direction_acc")} if self._direction is not None else {}),
                        **{k: v / max(self._sums["ptr_names"], 1) for k, v in self._sums.items()
                           if k.startswith("ptr_") and k != "ptr_names"}}, "train")
             self._sums.clear()
@@ -274,6 +286,8 @@ class HardNegTrainer(GVJEPATrainer):
             if self._numeric is not None:
                 _, mra, count = self._numeric_terms(batch, torch.ones(len(batch["query"]), device=device))
                 hits["val_numeric_mra"] += [mra] * count
+            if self._direction is not None:
+                hits["val_direction_acc"] += self._direction["hits"]
             if logits is None:
                 continue
             for r, hit in zip(rows.tolist(), (logits.argmax(1) == 0).tolist()):
