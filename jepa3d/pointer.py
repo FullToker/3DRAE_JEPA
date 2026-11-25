@@ -68,8 +68,9 @@ class ObjectPointers(nn.Module):
         mean = (feats * keep).sum((1, 2), keepdim=True) / (keep.sum((1, 2), keepdim=True) * feats.shape[2]).clamp_min(1)
         pad = ~valid[:, :, None].expand(-1, -1, feats.shape[2]).flatten(1)[rows]
         out = []
-        for cells in (F.normalize(feats - mean, dim=-1), F.normalize(feats, dim=-1)):
-            out.append(per_row(rows, text, cells.flatten(1, 2).transpose(1, 2)).masked_fill(pad, float("-inf")))
+        with torch.autocast(device_type=feats.device.type, enabled=False):   # cosines differ in the third digit
+            for cells in (F.normalize(feats - mean, dim=-1), F.normalize(feats, dim=-1)):
+                out.append(per_row(rows, text, cells.flatten(1, 2).transpose(1, 2)).masked_fill(pad, float("-inf")))
         return out
 
     def tokens(self, scene: torch.Tensor, similarity: torch.Tensor, rows: torch.Tensor, names: torch.Tensor):
