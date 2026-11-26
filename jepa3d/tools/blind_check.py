@@ -125,13 +125,17 @@ def val_loss(model, loader, device, temperature: float) -> dict:
     return {k: sum(v) / len(v) for k, v in sorted(stats.items())}
 
 
-def accuracy(model, loader, device) -> dict:
+def accuracy(model, loader, device, answer_token: bool = False) -> dict:
+    """answer_token: score the output of the model's answer token (jepa3d/answer.py) instead of the
+    mean over the question tokens."""
     stats = defaultdict(lambda: [0, 0])
     for batch in loader:
         images = batch["images_vggt"].to(device, non_blocking=True)
         cams = batch["images_jepa"].to(device, non_blocking=True)
         with torch.autocast("cuda", dtype=torch.bfloat16):
             pred = model.predict_embedding(images, cams, batch["query"], slots=slots_of(model, batch))
+        if answer_token:
+            pred = model.answer_output
         candidates = [_candidates(row) for row in batch["rows"]]
         scores = _score_candidate_batch(model, pred, candidates, device, include_scores=False)
         for row, cands, score in zip(batch["rows"], candidates, scores):

@@ -24,6 +24,7 @@ from torch.utils.data import ConcatDataset, DataLoader, Subset
 
 from jepa3d.paths import expand_paths  # noqa: F401  (sets sys.path for fusion_gv)
 from fusion_gv.gvjepa_trainer import GVJEPADataset
+from jepa3d.answer import short_answer
 from jepa3d.balance import KINDS, answer_class, numeric_target, type_key
 from jepa3d.delex import delexicalize
 from jepa3d.ground import collate_ground, ground_of, load_objects
@@ -44,7 +45,7 @@ class PosedSparDataset(GVJEPADataset):
 
     def __init__(self, manifest_path, max_views: int | None = None, mask_key: str = "group_id",
                  num_negatives: int = 0, answer_weights: dict | None = None, delexicalize: float = 0.0,
-                 fixed: bool = False, ground_objects: str | None = None):
+                 fixed: bool = False, ground_objects: str | None = None, short_answers: bool = False):
         super().__init__(manifest_path, num_frames=None)
         self.max_views = max_views
         self.mask_key = mask_key
@@ -54,6 +55,8 @@ class PosedSparDataset(GVJEPADataset):
         self.fixed = fixed                 # evaluation: the same rows and letters on every pass
         # true object centres of the scenes (jepa3d/tools/build_ground_labels.py) for the rows' "ground" labels
         self.objects = load_objects(ground_objects) if ground_objects else None
+        # the answer in its short form with its own wrong answers (jepa3d/answer.py), for the answer token
+        self.short_answers = short_answers
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         row = self._read_row(idx)
@@ -66,7 +69,12 @@ class PosedSparDataset(GVJEPADataset):
         negatives = (row.get("negatives") or []) if self.num_negatives else []
         if 0 < self.num_negatives < len(negatives):
             negatives = random.sample(negatives, self.num_negatives)
+        short, short_negatives = (short_answer(row) if self.short_answers else None) or (None, [])
+        if 0 < self.num_negatives < len(short_negatives):
+            short_negatives = random.sample(short_negatives, self.num_negatives)
         return {
+            "short": short,
+            "short_negatives": short_negatives if self.num_negatives else [],
             "image_paths": row["images"][:n],
             "intrinsics": row["intrinsics"][:n],
             "c2w": row["c2w"][:n],
@@ -131,6 +139,9 @@ def spar3d_collate(batch: List[Dict[str, Any]], image_size=(224, 308)) -> Dict[s
         "group_id": [s["group_id"] for s in batch],
         "negatives": [s["negatives"] for s in batch],
         "rows": [s["row"] for s in batch],
+        # short answers (jepa3d/answer.py): None for a row without one, and without data.short_answers
+        "short": [s.get("short") for s in batch],
+        "short_negatives": [s.get("short_negatives") or [] for s in batch],
         # inverse answer-frequency weight of each row (1 without a weight table)
         "weight": torch.tensor([s.get("weight", 1.0) for s in batch], dtype=torch.float32),
         # numeric answers (jepa3d/balance.py): kind index into KINDS (-1: not numeric) and the value
@@ -153,7 +164,8 @@ def build_loader(manifests, cfg: dict, batch_size: int, train: bool = True, limi
     # data.delexicalize: share of training rows; data.delexicalize_eval: of evaluation rows (set by the tools)
     share = dcfg.get("delexicalize", 0.0) if train else dcfg.get("delexicalize_eval", 0.0)
     datasets = [PosedSparDataset(p, dcfg.get("max_views"), dcfg.get("mask_key", "group_id"), k, weights, share,
-                                 fixed=not train, ground_objects=dcfg.get("ground_objects")) for p in manifests]
+                                 fixed=not train, ground_objects=dcfg.get("ground_objects"),
+                                 short_answers=dcfg.get("short_answers", False)) for p in manifests]
     ds = datasets[0] if len(datasets) == 1 else ConcatDataset(datasets)
     if limit:
         ds = Subset(ds, range(min(limit, len(ds))))

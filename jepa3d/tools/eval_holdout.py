@@ -5,7 +5,13 @@ Holdout rows come from jepa3d/tools/add_hard_negatives.py. Each row is scored
 in two answer formats:
 
     long   target sentence vs its "negatives" (same question, wrong answer)
-    short  "target_short" vs the row's "options" (VSI-590K multiple choice only)
+    short  the short answer vs its wrong short answers (jepa3d/answer.py: VSI-590K options, SPAR
+           orders and relation words)
+
+A model with an answer token (jepa3d/answer.py) is scored as it was trained: "long" by the mean over
+the question tokens, "short" by the answer token. "short_pooled" and "long_token" are the two other
+pairings, for reference. On the --eval manifests (VSI-Bench, short options) the answer token gives
+the manifest's entry and the mean over the question tokens "<manifest>_pooled".
 
 and with three visual inputs (jepa3d/tools/blind_check.py): "real", "shuffled"
 (each query sees another row's scene) and "zero". The gap real - shuffled is
@@ -41,6 +47,7 @@ import torch
 
 from jepa3d.paths import expand_paths  # noqa: F401  (sets sys.path for fusion_gv)
 from fusion_gv.infer_gvjepa import _load_checkpoint, _score_candidate_batch
+from jepa3d.answer import short_answer
 from jepa3d.balance import KINDS
 from jepa3d.names import name_options, name_terms
 from jepa3d.data import build_loader
@@ -53,8 +60,9 @@ from jepa3d.trainer import mean_relative_accuracy
 def candidates_of(row: dict) -> dict:
     """{format: (candidates in a fixed random order, answer)}."""
     out = {"long": ([row["target"], *row["negatives"]], row["target"])}
-    if row.get("options") and row.get("target_short") in row["options"]:
-        out["short"] = (list(dict.fromkeys(row["options"])), row["target_short"])
+    short = short_answer(row)
+    if short and short[1]:
+        out["short"] = ([short[0], *short[1]], short[0])
     rng = random.Random(f"{row['scene']}:{row['query']}")
     for cands, _ in out.values():   # the answer must not sit at a fixed index: argmax ties go to index 0
         rng.shuffle(cands)
@@ -166,14 +174,19 @@ def holdout_accuracy(model, loader, device, slot_log=None, ground_log=None, poin
         if slot_log is not None and getattr(model, "slot_metrics", None):
             slot_log.append((float(model.slot_metrics["acc"]), float(model.slot_metrics["error_m"])))
         per_row = [candidates_of(row) for row in batch["rows"]]
-        for fmt in ("long", "short"):
+        token = model.answer_output if model.answer_proj is not None else None
+        readings = [("long", "long", pred), ("short", "short", pred if token is None else token)]
+        if token is not None:
+            readings += [("short_pooled", "short", pred), ("long_token", "long", token)]
+        for name, fmt, vector in readings:
             cands = [c[fmt][0] if fmt in c else [] for c in per_row]
-            scores = _score_candidate_batch(model, pred, cands, device, include_scores=False)
+            scores = _score_candidate_batch(model, vector, cands, device, include_scores=False)
             for row, c, score in zip(batch["rows"], per_row, scores):
                 if score is None:
                     continue
                 options, answer = c[fmt]
-                for key in (f"{fmt}/all", f"{fmt}/{row['source']}/{row['question_type']}"):
+                for key in (f"{name}/all", f"{name}/{row['source']}/{row['question_type']}",
+                            f"{name}/{row['source']}"):
                     stats[key][0] += int(options[score[0]] == answer)
                     stats[key][1] += 1
                     stats[key][2] += 1 / len(options)
@@ -232,7 +245,10 @@ def main() -> None:
                                         "error_m": sum(e for _, e in slot_log) / len(slot_log)}
             for path in args.eval:
                 loader = build_loader([path], cfg, args.batch_size, train=False, limit=args.limit)
-                res[Path(path).stem] = accuracy(model, loader, device)
+                res[Path(path).stem] = accuracy(model, loader, device, answer_token=model.answer_proj is not None)
+                if model.answer_proj is not None:
+                    loader = build_loader([path], cfg, args.batch_size, train=False, limit=args.limit)
+                    res[Path(path).stem + "_pooled"] = accuracy(model, loader, device)
             for path in ([args.holdout] if args.holdout else []) + args.eval if model.name_head is not None else []:
                 loader = build_loader([path], cfg, args.batch_size, train=False, limit=args.limit)
                 res.setdefault("name_head", {})[Path(path).stem] = name_accuracy(model, loader, device)

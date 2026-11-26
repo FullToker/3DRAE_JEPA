@@ -49,6 +49,13 @@ the same questions and the scene of the previous row of the batch (the scene tok
 encoder is not run again; placeholders are rebuilt from that scene) and returns its prediction as
 "pred_neg": the question asked in another scene. jepa3d.trainer turns it into a loss.
 
+With "answer_token: {enabled: true}" (jepa3d/answer.py) one more token follows the question: the
+end-of-text embedding plus a learned offset, with the position id after the question's last token.
+Its output is taken off before the mean over the question tokens (that mean -> pred_proj stays the
+prediction of the answer sentence) and goes through a projection of its own: forward() returns it
+as "pred_short" (B, D), the prediction of the short answer; predict_embedding() leaves it in
+self.answer_output.
+
 Config (YAML) layout matches fusion_gv's, with
     fusion:  x_encoder_type: 3drae, x_encoder_output_dim: 768
     rae:     feature_config, max_views; or encoder: dinotxt, pool, max_views (dino.txt patches instead of 3DRAE)
@@ -57,6 +64,7 @@ Config (YAML) layout matches fusion_gv's, with
     numeric_head: enabled, hidden
     ground:  enabled, layer, hidden
     scene_negatives: enabled
+    answer_token: enabled
 """
 
 from functools import partial
@@ -79,7 +87,7 @@ from jepa3d.x_encoder import ThreeDRAEXEncoder, encode_patches, unpack_cams, vie
 class ThreeDRAEJEPA(FusionGVJEPA):
     def __init__(self, config, rae_cfg: dict | None = None, slot_cfg: dict | None = None,
                  numeric_cfg: dict | None = None, ground_cfg: dict | None = None, name_cfg: dict | None = None,
-                 scene_cfg: dict | None = None):
+                 scene_cfg: dict | None = None, answer_cfg: dict | None = None):
         rae_cfg = rae_cfg or {}
         if rae_cfg.get("encoder", "3drae") == "dinotxt":   # baseline without 3DRAE (jepa3d/x_encoder_dinotxt.py)
             from jepa3d.x_encoder_dinotxt import DinoTxtXEncoder
@@ -164,6 +172,40 @@ class ThreeDRAEJEPA(FusionGVJEPA):
             self.ground_head = GroundHead(self.pred_proj.in_features, ground_cfg.get("hidden", 512))
             layer = self.predictor.layers[ground_cfg.get("layer", 4) - 1]
             layer.register_forward_hook(self._tap_ground)
+
+        self.answer_proj = None
+        self.answer_output = None
+        self._answer_hidden = None
+        if (answer_cfg or {}).get("enabled"):
+            if self.uses_slots:
+                raise ValueError("answer_token and slots cannot be combined")
+            width = self.pred_proj.in_features
+            self.answer_delta = torch.nn.Parameter(torch.zeros(width))
+            self.answer_proj = torch.nn.Linear(width, self.pred_proj.out_features)
+            self.predictor.register_forward_pre_hook(self._append_answer, with_kwargs=True)
+            self.predictor.register_forward_hook(self._remove_answer, with_kwargs=True)
+
+    def _append_answer(self, _module, args, kwargs):
+        """Forward pre-hook on the predictor: x (B, S + L, h) gets the answer token appended."""
+        x, mask, position = args[0], kwargs["attention_mask"], kwargs["position_ids"]
+        B = x.shape[0]
+        end = self.predictor.get_input_embeddings().weight[self.query_tokenizer.eos_token_id]
+        token = (self.query_in_proj(end) + self.answer_delta + self.modality_embed.weight[1]).to(x.dtype)
+        if position.dim() == 1:
+            position = position.unsqueeze(0).expand(B, -1)
+        # scene tokens have position 0, question token l has l + 1: one past the last real question token
+        after = (position * mask.to(position.dtype)).amax(1, keepdim=True) + 1
+        return (torch.cat([x, token.expand(B, 1, -1)], dim=1),), {
+            **kwargs, "attention_mask": torch.cat([mask, mask.new_ones(B, 1)], dim=1),
+            "position_ids": torch.cat([position, after], dim=1)}
+
+    def _remove_answer(self, _module, _args, _kwargs, out):
+        self._answer_hidden = out[:, -1]
+        return out[:, :-1]
+
+    def _answer(self):
+        hidden, self._answer_hidden = self._answer_hidden, None
+        return self.answer_proj(hidden)
 
     def _tap_ground(self, _module, _args, out):
         self._ground_hidden = out[0] if isinstance(out, tuple) else out
@@ -365,6 +407,8 @@ class ThreeDRAEJEPA(FusionGVJEPA):
                 out["numeric"] = self._numeric()
             if self.name_head is not None:
                 out["name_pred"] = self.name_head(self._pooled.float())
+            if self.answer_proj is not None:
+                out["pred_short"] = self._answer()
             if self.scene_negatives and self.training and len(queries) > 1:
                 out["pred_neg"] = self._predict_other_scene(images, cams, queries, slots)
             return out
@@ -385,6 +429,8 @@ class ThreeDRAEJEPA(FusionGVJEPA):
                 self.numeric_output = self._numeric()
             if self.name_head is not None:
                 self.name_output = self.name_head(self._pooled.float())
+            if self.answer_proj is not None:
+                self.answer_output = self._answer()
             return pred
         finally:
             self._pending = None
@@ -426,6 +472,7 @@ def build_model_from_config(cfg: dict) -> ThreeDRAEJEPA:
     cfg = {**cfg, "fusion": {"jepa_ckpt": None, **cfg["fusion"]}}
     factory = partial(ThreeDRAEJEPA, rae_cfg=cfg.get("rae"), slot_cfg=cfg.get("slots"),
                       numeric_cfg=cfg.get("numeric_head"), ground_cfg=cfg.get("ground"),
-                      name_cfg=cfg.get("name_target"), scene_cfg=cfg.get("scene_negatives"))
+                      name_cfg=cfg.get("name_target"), scene_cfg=cfg.get("scene_negatives"),
+                      answer_cfg=cfg.get("answer_token"))
     with mock.patch.object(gvjepa, "FusionGVJEPA", factory):
         return _build_fusion_gv_model(cfg)

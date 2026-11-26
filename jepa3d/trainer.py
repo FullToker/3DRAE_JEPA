@@ -36,6 +36,12 @@ previous row of the batch gives "pred_neg"; scene_weight times the cross-entropy
 [cos(pred, target), cos(pred_neg, target)] / temperature with the real scene as the answer, over the
 rows whose neighbour is another scene. scene_loss and scene_acc (real scene closer to the answer) are logged.
 
+answer token (models with an answer token, jepa3d/answer.py; data.short_answers): the token's output
+against the short answers, with the same two terms as the sentence: answer_weight * (InfoNCE over
+this rank's rows that have a short answer, equal short answers masked, + hard_weight * cross-entropy
+against [short answer, its own wrong short answers]). short_loss, short_hard_loss and short_hard_acc
+are logged, validation adds val_short_hard_acc by question type.
+
 pointer (models with object pointers, jepa3d/pointer.py): pointer_weight times
 the pointing loss, summed over the supervised layers. Per layer k the log gets
 ptr_l<k>_loss, ptr_l<k>_acc (best cell on the object) and ptr_l<k>_error_m
@@ -94,6 +100,22 @@ def hard_logits(pred, target, neg, owner, slot, temperature: float):
     return torch.cat([pos[:, None], table], dim=1)[rows], rows
 
 
+def choice_logits(pred, target, neg, negatives, temperature: float):
+    """pred, target (B, D); neg (M, D): the vectors of the wrong answers in `negatives` (one list per
+    row), row after row. -> hard_logits' (logits, rows), or (None, None) without wrong answers."""
+    if not len(neg):
+        return None, None
+    owner = torch.tensor([i for i, ns in enumerate(negatives) for _ in ns], device=pred.device)
+    slot = torch.tensor([k for ns in negatives for k in range(len(ns))], device=pred.device)
+    return hard_logits(pred, target, neg, owner, slot, temperature)
+
+
+def text_ids(texts, device) -> torch.Tensor:
+    """One id per distinct text (case ignored): rows with the same short answer are not each other's negatives."""
+    ids = {}
+    return torch.tensor([ids.setdefault(t.strip().lower(), len(ids)) for t in texts], device=device)
+
+
 def pointer_sums(terms: dict) -> dict:
     """The model's pointer terms of one forward -> sums over its labelled names, to be divided by "ptr_names"."""
     if "rows" not in terms:   # no labelled, visible name in the batch
@@ -112,7 +134,7 @@ def pointer_sums(terms: dict) -> dict:
 class HardNegTrainer(GVJEPATrainer):
     def __init__(self, *args, hard_weight: float = 1.0, slot_weight: float = 1.0, numeric_weight: float = 1.0,
                  ground_weight: float = 1.0, name_weight: float = 1.0, pointer_weight: float = 1.0,
-                 scene_weight: float = 1.0, **kwargs):
+                 scene_weight: float = 1.0, answer_weight: float = 1.0, **kwargs):
         super().__init__(*args, **kwargs)
         self.hard_weight = hard_weight
         self.slot_weight = slot_weight
@@ -121,6 +143,8 @@ class HardNegTrainer(GVJEPATrainer):
         self.name_weight = name_weight
         self.pointer_weight = pointer_weight
         self.scene_weight = scene_weight
+        self.answer_weight = answer_weight
+        self._short = None      # the answer token's terms of the last forward
         self._pred_neg = None   # the model's prediction for the questions in another scene, last forward
         self._ptr = None      # the model's pointer terms of the last forward
         self._name = None
@@ -137,8 +161,22 @@ class HardNegTrainer(GVJEPATrainer):
         cams = batch["images_jepa"].to(device, non_blocking=True)
         negatives = batch["negatives"]
         flat = [n for ns in negatives for n in ns]
-        out = model(images, cams, batch["query"], batch["target"] + flat, slots=batch.get("slots"),
-                    ground=batch.get("ground"))
+        short_rows = [i for i, s in enumerate(batch.get("short") or []) if s]
+        short_texts = [batch["short"][i] for i in short_rows]
+        short_negatives = [batch["short_negatives"][i] for i in short_rows]
+        short_flat = [n for ns in short_negatives for n in ns]
+        out = model(images, cams, batch["query"], batch["target"] + flat + short_texts + short_flat,
+                    slots=batch.get("slots"), ground=batch.get("ground"))
+        self._short = None
+        if "pred_short" in out and short_rows:
+            start = len(batch["target"]) + len(flat)
+            rows = torch.tensor(short_rows, device=device)
+            pred_short = out["pred_short"][rows]
+            target_short = out["target"][start:start + len(rows)]
+            logits, hard = choice_logits(pred_short, target_short, out["target"][start + len(rows):],
+                                         short_negatives, self.temperature)
+            self._short = {"pred": pred_short, "target": target_short, "rows": rows, "logits": logits,
+                           "hard": hard, "ids": text_ids(short_texts, device)}
         self._ground = {k[7:]: v for k, v in out.items() if k.startswith("ground_")} or None
         B = len(negatives)
         self._ptr = {k[4:]: v for k, v in out.items() if k.startswith("ptr_")} or None
@@ -153,7 +191,7 @@ class HardNegTrainer(GVJEPATrainer):
             return pred, target, None, None
         owner = torch.tensor([i for i, ns in enumerate(negatives) for _ in ns], device=device)
         slot = torch.tensor([k for ns in negatives for k in range(len(ns))], device=device)
-        logits, rows = hard_logits(pred, target, out["target"][B:], owner, slot, self.temperature)
+        logits, rows = hard_logits(pred, target, out["target"][B:B + len(flat)], owner, slot, self.temperature)
         return pred, target, logits, rows
 
     def _scene_terms(self, pred, target, rows):
@@ -237,6 +275,21 @@ class HardNegTrainer(GVJEPATrainer):
                 loss = loss + self.pointer_weight * self._ptr["loss"]
                 for key, value in pointer_sums(self._ptr).items():
                     self._sums[key] += value
+            if self._short is not None:
+                s = self._short
+                own = weights[s["rows"]]
+                short = weighted_infonce(s["pred"].float(), s["target"].float(), self.temperature, s["ids"], own)
+                loss = loss + self.answer_weight * short
+                self._sums["short_loss"] += short.item() * len(own)
+                self._sums["short_rows"] += len(own)
+                if s["logits"] is not None:
+                    per_row = F.cross_entropy(s["logits"], torch.zeros(len(s["logits"]), dtype=torch.long, device=device),
+                                              reduction="none")
+                    short_hard = (per_row * own[s["hard"]]).sum() / own[s["hard"]].sum()
+                    loss = loss + self.answer_weight * self.hard_weight * short_hard
+                    self._sums["short_hard_loss"] += short_hard.item() * len(per_row)
+                    self._sums["short_hard_acc"] += (s["logits"].argmax(1) == 0).float().sum().item()
+                    self._sums["short_hard_rows"] += len(per_row)
             loss = loss / self.grad_accum_steps
 
         rows = 0 if logits is None else len(logits)
@@ -260,7 +313,11 @@ class HardNegTrainer(GVJEPATrainer):
                        **{k: v / max(self._sums["ptr_names"], 1) for k, v in self._sums.items()
                           if k.startswith("ptr_") and k != "ptr_names"},
                        **({k: self._sums[k] / max(self._sums["scene_rows"], 1) for k in ("scene_loss", "scene_acc")}
-                          if self._pred_neg is not None else {})}, "train")
+                          if self._pred_neg is not None else {}),
+                       **({"short_loss": self._sums["short_loss"] / self._sums["short_rows"],
+                           "short_hard_loss": self._sums["short_hard_loss"] / max(self._sums["short_hard_rows"], 1),
+                           "short_hard_acc": self._sums["short_hard_acc"] / max(self._sums["short_hard_rows"], 1)}
+                          if self._sums["short_rows"] else {})}, "train")
             self._sums.clear()
         return loss, infonce.item()
 
@@ -304,6 +361,11 @@ class HardNegTrainer(GVJEPATrainer):
             if self._numeric is not None:
                 _, mra, count = self._numeric_terms(batch, torch.ones(len(batch["query"]), device=device))
                 hits["val_numeric_mra"] += [mra] * count
+            if self._short is not None and self._short["logits"] is not None:
+                s = self._short
+                for r, hit in zip(s["rows"][s["hard"]].tolist(), (s["logits"].argmax(1) == 0).tolist()):
+                    hits["val_short_hard_acc"].append(hit)
+                    hits[f"val_short_hard_acc_type/{batch['rows'][r].get('question_type')}"].append(hit)
             if logits is None:
                 continue
             for r, hit in zip(rows.tolist(), (logits.argmax(1) == 0).tolist()):
