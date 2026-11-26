@@ -44,6 +44,11 @@ at a scene token that shows the object (rows with "ground" labels and their "vie
 ground=) returns "ptr_loss" and the per-name terms, predict_embedding() leaves them in
 self.pointer_metrics.
 
+With "scene_negatives: {enabled: true}" a training forward runs the predictor a second time with
+the same questions and the scene of the previous row of the batch (the scene tokens are reused, the
+encoder is not run again; placeholders are rebuilt from that scene) and returns its prediction as
+"pred_neg": the question asked in another scene. jepa3d.trainer turns it into a loss.
+
 Config (YAML) layout matches fusion_gv's, with
     fusion:  x_encoder_type: 3drae, x_encoder_output_dim: 768
     rae:     feature_config, max_views; or encoder: dinotxt, pool, max_views (dino.txt patches instead of 3DRAE)
@@ -51,6 +56,7 @@ Config (YAML) layout matches fusion_gv's, with
     name_target: enabled, hidden (jepa3d/names.py)
     numeric_head: enabled, hidden
     ground:  enabled, layer, hidden
+    scene_negatives: enabled
 """
 
 from functools import partial
@@ -72,7 +78,8 @@ from jepa3d.x_encoder import ThreeDRAEXEncoder, encode_patches, unpack_cams, vie
 
 class ThreeDRAEJEPA(FusionGVJEPA):
     def __init__(self, config, rae_cfg: dict | None = None, slot_cfg: dict | None = None,
-                 numeric_cfg: dict | None = None, ground_cfg: dict | None = None, name_cfg: dict | None = None):
+                 numeric_cfg: dict | None = None, ground_cfg: dict | None = None, name_cfg: dict | None = None,
+                 scene_cfg: dict | None = None):
         rae_cfg = rae_cfg or {}
         if rae_cfg.get("encoder", "3drae") == "dinotxt":   # baseline without 3DRAE (jepa3d/x_encoder_dinotxt.py)
             from jepa3d.x_encoder_dinotxt import DinoTxtXEncoder
@@ -94,6 +101,9 @@ class ThreeDRAEJEPA(FusionGVJEPA):
         with mock.patch.object(gvjepa, "build_x_encoder", lambda _cfg: x_encoder):
             super().__init__(config)
         self._pending = None   # (queries, slots) of the forward in progress
+        self.scene_negatives = bool((scene_cfg or {}).get("enabled"))
+        self._scene_tokens = None   # the encoder's tokens of the forward in progress
+        self._other_scene = False   # the pass in progress shows every question the previous row's scene
         self.slot_encoder = None
         self.object_tokens = None
         self.slot_metrics = None
@@ -355,6 +365,8 @@ class ThreeDRAEJEPA(FusionGVJEPA):
                 out["numeric"] = self._numeric()
             if self.name_head is not None:
                 out["name_pred"] = self.name_head(self._pooled.float())
+            if self.scene_negatives and self.training and len(queries) > 1:
+                out["pred_neg"] = self._predict_other_scene(images, cams, queries, slots)
             return out
         finally:
             self._pending = None
@@ -377,6 +389,22 @@ class ThreeDRAEJEPA(FusionGVJEPA):
         finally:
             self._pending = None
 
+    def _predict_other_scene(self, images, cams, queries, slots) -> torch.Tensor:
+        """The prediction (B, D) for every question with the scene of the previous row of the batch."""
+        last = getattr(self.x_encoder, "last", None)
+        kept = dict(last) if last is not None else None
+        if last is not None:   # the placeholders read the patch features: they must be the other scene's too
+            last.update({k: last[k].roll(1, 0) for k in ("features", "valid")})
+        self._other_scene = True
+        self._begin(images, cams, queries, slots)
+        try:
+            return FusionGVJEPA.predict_embedding(self, images, cams, queries)
+        finally:
+            self._other_scene = False
+            self._ptr, self._taps = None, {}
+            if kept is not None:
+                last.update(kept)
+
     def _pool_visual(self, images, cams, batch_size):
         """images (B, V, 3, H, W), cams (B, V, 25) -> tokens (B, T, D), (B, 1, T, D).
 
@@ -384,8 +412,12 @@ class ThreeDRAEJEPA(FusionGVJEPA):
         means FusionGVJEPA tags every token with the same frame_embed row and
         frame shuffling is a no-op.
         """
-        with torch.profiler.record_function("x_encoder"):
-            tokens = self.x_encoder(images, cams)
+        if self._other_scene:
+            tokens = self._scene_tokens.roll(1, 0)
+        else:
+            with torch.profiler.record_function("x_encoder"):
+                tokens = self.x_encoder(images, cams)
+            self._scene_tokens = tokens if self.scene_negatives else None
         return tokens, tokens.unsqueeze(1)
 
 
@@ -394,6 +426,6 @@ def build_model_from_config(cfg: dict) -> ThreeDRAEJEPA:
     cfg = {**cfg, "fusion": {"jepa_ckpt": None, **cfg["fusion"]}}
     factory = partial(ThreeDRAEJEPA, rae_cfg=cfg.get("rae"), slot_cfg=cfg.get("slots"),
                       numeric_cfg=cfg.get("numeric_head"), ground_cfg=cfg.get("ground"),
-                      name_cfg=cfg.get("name_target"))
+                      name_cfg=cfg.get("name_target"), scene_cfg=cfg.get("scene_negatives"))
     with mock.patch.object(gvjepa, "FusionGVJEPA", factory):
         return _build_fusion_gv_model(cfg)

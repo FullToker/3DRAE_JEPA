@@ -190,7 +190,7 @@ def collate_slots(rows, drop: bool = False):
             conf.append(slot["conf"][:k] + [slot["conf"][0]] * pad)
             owner.append(i)
             spans.append(slot["spans"])
-            names.append(slot.get("name", ""))
+            names.append(slot.get("lookup") or slot.get("name", ""))
             scale.append(scene_scale(row["c2w"]) if "c2w" in row else 1.0)
             if "patch" in slot:
                 patch.append(slot["patch"][:k] + [slot["patch"][0]] * pad)

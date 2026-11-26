@@ -52,6 +52,8 @@ CONFIG="jepa3d/configs/$NAME.yaml"
 DATA=${DATA:-$EXP/data}   # manifests with slots; an experiment that reuses another one's passes DATA=experiments/<other>/data
 # DELEX_EVAL=1: train mode evaluates a second time with all rows delexicalized (jepa3d/delex.py),
 #   eval mode only that way -> results/eval_<ckpt>_delex.json
+# MODES="<mode> ...": only these visual inputs / controls; SUFFIX=<text>: appended to the eval file's name
+#   (MODE=eval of an old checkpoint with a new control must not overwrite its eval_final.json)
 # NUMERIC="<jsonl> ..." WEIGHTS=<json of jepa3d/balance.py>: numeric questions for models with a numeric head
 
 cd "$ROOT"
@@ -87,7 +89,7 @@ run_eval() {   # <checkpoint> <output json> [extra eval_holdout.py args]
     $SIF python3 jepa3d/tools/eval_holdout.py --config "$CONFIG" --checkpoint "$ckpt" \
         --holdout "$DATA/holdout_f8.jsonl" \
         --eval "$DATA/vsibench_test_posed_f8.jsonl" "$DATA/vsibench_debiased_posed_f8.jsonl" \
-        ${NUMERIC:+--numeric $NUMERIC} ${WEIGHTS:+--answer-weights "$WEIGHTS"} \
+        ${NUMERIC:+--numeric $NUMERIC} ${WEIGHTS:+--answer-weights "$WEIGHTS"} ${MODES:+--modes $MODES} \
         --output "$out" "$@"
 }
 
@@ -116,9 +118,9 @@ baseline)   # object pointers before any training: where does the untrained choi
 eval)
     CHECKPOINT=${CHECKPOINT:-$EXP/ckpt/final.pt}
     if [ -n "${DELEX_EVAL:-}" ]; then
-        run_eval "$CHECKPOINT" "$EXP/results/eval_$(basename "$CHECKPOINT" .pt)_delex.json" --delexicalize
+        run_eval "$CHECKPOINT" "$EXP/results/eval_$(basename "$CHECKPOINT" .pt)_delex${SUFFIX:-}.json" --delexicalize
     else
-        run_eval "$CHECKPOINT" "$EXP/results/eval_$(basename "$CHECKPOINT" .pt).json"
+        run_eval "$CHECKPOINT" "$EXP/results/eval_$(basename "$CHECKPOINT" .pt)${SUFFIX:-}.json"
     fi
     ;;
 diagnose)

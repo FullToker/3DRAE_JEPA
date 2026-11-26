@@ -1,0 +1,117 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# scneg_v1: objptr_v1_l2 + the same question asked in another scene as a negative
+# ──────────────────────────────────────────────────────────────────────────────
+#
+# Question: does a negative on the scene side reduce the text shortcut, i.e. make the answer depend
+# on the scene? All answer losses so far compare one prediction with several answers; a prediction
+# that ignores the scene can lower them.
+#
+# Change (scene_negatives, jepa3d/model.py, jepa3d/trainer.py): every training step runs the predictor
+# a second time with the same questions and the scene of the previous row of the batch (placeholders
+# rebuilt from that scene). New term, weight train.scene_weight:
+#     cross-entropy of [cos(pred, answer), cos(pred in the other scene, answer)] / temperature,
+#     the real scene being the right choice
+# over the rows whose neighbour is a different scene. The other scene is a random one: it may lack the
+# question's objects, and for a two-way question it may have the same answer (about half the time).
+#
+# Everything else is objptr_v1_l2 (dino.txt patches as scene tokens, one placeholder per object name
+# with the pointing loss after predictor layer 2, hardneg_v1's schedule and initial weights).
+#
+# What counts as evidence: real - shuffled is what the new term optimizes, so it is no evidence.
+# Read instead: "mirrored" (images and cameras flipped left-right at evaluation, never trained),
+# the delexicalized evaluation, VSI-Bench debiased, and the pointing hit rate.
+#
+# Checkpoint, results and logs live in experiments/scneg_v1/; the data is objptr_v1's.
+# Run: slots_train.sbatch with NAME=scneg_v1 DATA=experiments/objptr_v1/data DELEX_EVAL=1
+# ──────────────────────────────────────────────────────────────────────────────
+
+init_vljepa_ckpt: ${VJEPA_ROOT}/ckpts/open_vljepa/best.pt
+
+rae:
+  encoder: dinotxt   # jepa3d/x_encoder_dinotxt.py
+  pool: 2            # patches averaged per side: 16 x 22 -> 8 x 11 tokens per view
+  max_views: 32
+
+slots:
+  enabled: true
+  mode: pointer     # jepa3d/pointer.py
+  layers: [2]    # objptr_v1: [2, 4]; objptr_v1_l2: [2]; objptr_v1_l4: [4]
+
+scene_negatives:
+  enabled: true
+
+fusion:
+  x_encoder_type: 3drae
+  x_encoder_output_dim: 768
+
+model:
+  query_model_name: meta-llama/Llama-3.2-1B
+  predictor_llama_layers: 8
+  max_query_tokens: 256
+  y_encoder_name: google/embeddinggemma-300m
+  max_target_tokens: 256
+  shared_embed_dim: 1536
+  y_encoder_lr_multiplier: 0.05
+  hf_cache_dir: ${VJEPA_ROOT}/ckpts
+
+data:
+  train_manifests:
+    - ${RAE_ROOT}/experiments/objptr_v1/data/train_f8.jsonl
+  val_manifests:
+    - ${RAE_ROOT}/experiments/objptr_v1/data/holdout_f8.jsonl   # shuffled, all rows have negatives
+  # true object centres of every scene; the rows' "ground" labels index into it
+  ground_objects: ${RAE_ROOT}/experiments/objptr_v1/data/scene_objects.json
+  mask_key: answer_key   # InfoNCE: equal answer_key pairs are masked
+  num_negatives: 3       # wrong answers per row in training (4-way choice); validation scores all
+  image_size: [224, 308]    # (H, W), multiple of 14, ScanNet aspect, as 3DRAE's ScanNet examples
+  num_workers: 8
+  val_num_workers: 2
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 2
+
+train:
+  seed: 42
+  device: cuda
+  precision: bf16
+  output_dir: ${RAE_ROOT}/experiments/scneg_v1/ckpt
+
+  batch_size: 32
+  gradient_accumulation_steps: 4
+  # effective batch = 32 * 4 * 3 GPUs = 384. max_steps counts per-rank
+  # micro-batches: 6870 * 32 * 3 = 660k samples = about 1 epoch of train_f8.jsonl
+  # (658,518 rows)
+  # = 1717 optimizer updates.
+  max_steps: 6870
+  hard_weight: 1.0
+  scene_weight: 1.0     # the other-scene term
+  pointer_weight: 1.0   # times the pointing loss, summed over the two layers
+
+  clip_grad_norm: 1.0
+  log_every: 50
+  save_every: 0      # final.pt only (~14 GB)
+  val_every: 500
+  val_max_batches: 60   # 1920 holdout rows
+  val_batch_size: 32
+
+  learning_rate: 1.0e-4
+  min_lr: 1.0e-5
+  warmup_steps: 200   # optimizer updates
+  weight_decay: 0.01
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-8
+  scheduler: cosine
+  temperature: 0.07
+
+mlflow:
+  enabled: true
+  env_file: ${VJEPA_ROOT}/.env/mlflow.env
+  tracking_uri: "file:///glob/g01-cache/pf/Yushuo/mlruns"
+  experiment_name: vljepa_sft_from_ckpt
+  run_name: scneg_v1
+  log_params: true
+  tags:
+    project: vljepa-3drae
+    variant: dinotxt-patches-704
+    data: vsi590k-spar-f8-hardneg-ground-visible

@@ -153,7 +153,7 @@ def holdout_accuracy(model, loader, device, slot_log=None, ground_log=None, poin
                 row = batch["rows"][r]
                 for key in ("all", f"{row['source']}/{row['question_type']}", f"subset:{row.get('subset')}"):
                     ground_log[key].append((error, hit, chance))
-        if pointer_log is not None and "rows" in (model.pointer_metrics or {}):
+        if pointer_log is not None and "rows" in (model.pointer_metrics or {}) and model._slot_mode != "mirrored":
             m = {k: v.tolist() for k, v in model.pointer_metrics.items()
                  if k.endswith(("_hits", "_errors")) or k in ("rows", "chance")}
             for n, r in enumerate(m["rows"]):

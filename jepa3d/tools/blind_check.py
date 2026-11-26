@@ -42,8 +42,27 @@ MODES = ("real", "shuffled", "zero")
 SLOT_MODES = ("slots_swapped", "slots_none", "all_shuffled")
 
 
+# Only for models with object pointers (jepa3d/pointer.py), never part of training:
+#   mirrored       every image flipped left-right with its camera; left and right swap, nothing else changes,
+#                  so a model that reads the side from the scene must now get left / right questions wrong
+EXTRA_MODES = ("mirrored",)
+
+
 def modes_of(model) -> tuple:
-    return MODES + (SLOT_MODES if model.uses_slots else ())
+    return (MODES + (SLOT_MODES if model.uses_slots else ())
+            + (EXTRA_MODES if getattr(model, "pointers", None) is not None else ()))
+
+
+def mirror(images, cams):
+    """images (B, V, 3, H, W), cams (B, V, 25) [K | w2c] -> the scene seen in a mirror (x -> -x)."""
+    width = images.shape[-1]
+    cams = cams.clone()
+    real = cams[..., 0] > 0                                   # padded views have K = 0
+    cams[..., 2] = torch.where(real, width - cams[..., 2], cams[..., 2])
+    w2c = cams[..., 9:].unflatten(-1, (4, 4))
+    flip = torch.diag(torch.tensor([-1.0, 1.0, 1.0, 1.0], device=cams.device, dtype=cams.dtype))
+    cams[..., 9:] = (flip @ w2c @ flip).flatten(-2)
+    return images.flip(-1), cams
 
 
 def set_mode(model, mode: str) -> None:
@@ -51,6 +70,8 @@ def set_mode(model, mode: str) -> None:
     original = type(model)._pool_visual
 
     def pool(images, cams, batch_size):
+        if mode == "mirrored":
+            images, cams = mirror(images, cams)
         tokens, frames = original(model, images, cams, batch_size)
         if mode in ("shuffled", "all_shuffled"):
             tokens = tokens.roll(1, 0)

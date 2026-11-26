@@ -31,6 +31,11 @@ ground (models with a GroundHead, jepa3d/ground.py): the head's choice and
 regression terms on the names with a true position; ground_loss, ground_acc
 and ground_error_m (median, metres) go to the same log.
 
+scene (models with scene_negatives, jepa3d/model.py): the same question asked in the scene of the
+previous row of the batch gives "pred_neg"; scene_weight times the cross-entropy of
+[cos(pred, target), cos(pred_neg, target)] / temperature with the real scene as the answer, over the
+rows whose neighbour is another scene. scene_loss and scene_acc (real scene closer to the answer) are logged.
+
 pointer (models with object pointers, jepa3d/pointer.py): pointer_weight times
 the pointing loss, summed over the supervised layers. Per layer k the log gets
 ptr_l<k>_loss, ptr_l<k>_acc (best cell on the object) and ptr_l<k>_error_m
@@ -106,7 +111,8 @@ def pointer_sums(terms: dict) -> dict:
 
 class HardNegTrainer(GVJEPATrainer):
     def __init__(self, *args, hard_weight: float = 1.0, slot_weight: float = 1.0, numeric_weight: float = 1.0,
-                 ground_weight: float = 1.0, name_weight: float = 1.0, pointer_weight: float = 1.0, **kwargs):
+                 ground_weight: float = 1.0, name_weight: float = 1.0, pointer_weight: float = 1.0,
+                 scene_weight: float = 1.0, **kwargs):
         super().__init__(*args, **kwargs)
         self.hard_weight = hard_weight
         self.slot_weight = slot_weight
@@ -114,6 +120,8 @@ class HardNegTrainer(GVJEPATrainer):
         self.ground_weight = ground_weight
         self.name_weight = name_weight
         self.pointer_weight = pointer_weight
+        self.scene_weight = scene_weight
+        self._pred_neg = None   # the model's prediction for the questions in another scene, last forward
         self._ptr = None      # the model's pointer terms of the last forward
         self._name = None
         self._ground = None   # the model's ground terms of the last forward
@@ -134,6 +142,7 @@ class HardNegTrainer(GVJEPATrainer):
         self._ground = {k[7:]: v for k, v in out.items() if k.startswith("ground_")} or None
         B = len(negatives)
         self._ptr = {k[4:]: v for k, v in out.items() if k.startswith("ptr_")} or None
+        self._pred_neg = out.get("pred_neg")
         self._slot = {k[5:]: v for k, v in out.items() if k.startswith("slot_")} or None
         self._numeric = out.get("numeric")
         self._name = None
@@ -146,6 +155,18 @@ class HardNegTrainer(GVJEPATrainer):
         slot = torch.tensor([k for ns in negatives for k in range(len(ns))], device=device)
         logits, rows = hard_logits(pred, target, out["target"][B:], owner, slot, self.temperature)
         return pred, target, logits, rows
+
+    def _scene_terms(self, pred, target, rows):
+        """-> (loss, share of rows whose real scene is closer to the answer, rows used). Row i's other scene
+        is row i - 1's; rows whose neighbour shows the same scene are left out."""
+        scene = [f"{row.get('subset')}/{row.get('scene')}" for row in rows]
+        use = torch.tensor([scene[i] != scene[i - 1] for i in range(len(scene))], device=pred.device)
+        if not use.any():
+            return self._pred_neg.sum() * 0.0, 0.0, 0
+        target = F.normalize(target.float(), dim=-1)
+        real = (F.normalize(pred.float(), dim=-1) * target).sum(-1)[use] / self.temperature
+        other = (F.normalize(self._pred_neg.float(), dim=-1) * target).sum(-1)[use] / self.temperature
+        return F.softplus(other - real).mean(), (real > other).float().mean().item(), int(use.sum())
 
     def _numeric_terms(self, batch, weights):
         """-> (loss, mean relative accuracy, rows with a numeric answer)."""
@@ -163,6 +184,7 @@ class HardNegTrainer(GVJEPATrainer):
         device = self.accelerator.device
         with self.accelerator.autocast():
             pred, target, logits, hard_rows = self._forward(self.model, batch)
+            local_pred, local_target = pred, target   # this rank's rows, before the gather across ranks
             B = pred.shape[0]
             weights = batch["weight"].to(device) if "weight" in batch else torch.ones(B, device=device)
             if logits is None:
@@ -205,6 +227,12 @@ class HardNegTrainer(GVJEPATrainer):
                 self._sums["ground_names"] += names
                 for key in ("loss", "acc", "error_m"):
                     self._sums[f"ground_{key}"] += float(self._ground[key]) * names
+            if self._pred_neg is not None:
+                scene, scene_acc, scene_rows = self._scene_terms(local_pred, local_target, batch["rows"])
+                loss = loss + self.scene_weight * scene
+                self._sums["scene_loss"] += scene.item() * scene_rows
+                self._sums["scene_acc"] += scene_acc * scene_rows
+                self._sums["scene_rows"] += scene_rows
             if self._ptr is not None:
                 loss = loss + self.pointer_weight * self._ptr["loss"]
                 for key, value in pointer_sums(self._ptr).items():
@@ -230,7 +258,9 @@ class HardNegTrainer(GVJEPATrainer):
                        **({"name_acc": self._sums["name_acc"] / max(self._sums["name_rows"], 1)}
                           if self._name is not None else {}),
                        **{k: v / max(self._sums["ptr_names"], 1) for k, v in self._sums.items()
-                          if k.startswith("ptr_") and k != "ptr_names"}}, "train")
+                          if k.startswith("ptr_") and k != "ptr_names"},
+                       **({k: self._sums[k] / max(self._sums["scene_rows"], 1) for k in ("scene_loss", "scene_acc")}
+                          if self._pred_neg is not None else {})}, "train")
             self._sums.clear()
         return loss, infonce.item()
 

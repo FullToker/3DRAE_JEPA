@@ -60,6 +60,8 @@ def delexicalize(row: dict, rng: random.Random) -> dict:
     for field in LIST_FIELDS:
         if row.get(field):
             out[field] = [replace(x) for x in row[field]]
-    out["slots"] = [{**slot, "name": label[slot["name"]], "spans": new_spans[slot["name"]]} for slot in slots]
+    # "lookup": the real name, only for finding the object's patches (jepa3d/pointer.py)
+    out["slots"] = [{**slot, "name": label[slot["name"]], "lookup": slot["name"], "spans": new_spans[slot["name"]]}
+                    for slot in slots]
     out["delexicalized"] = True
     return out
