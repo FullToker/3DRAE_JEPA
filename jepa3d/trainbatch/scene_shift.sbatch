@@ -8,6 +8,7 @@
 
 # What another scene changes in the prediction (jepa3d/tools/scene_shift_check.py), for the checkpoints
 # of RUNS (default: scneg_v1 and its base objptr_v1_l2) -> experiments/<run>/results/scene_shift.json
+# DATA=<dir with the manifests>, SUFFIX=<text appended to the output's name>.
 # Pass --output/--error in experiments/scneg_v1/logs.
 
 set -euo pipefail
@@ -22,6 +23,6 @@ for run in ${RUNS:-scneg_v1 objptr_v1_l2}; do
         python3 jepa3d/tools/scene_shift_check.py --config "jepa3d/configs/$run.yaml" \
         --checkpoint "experiments/$run/ckpt/final.pt" \
         --manifests "$DATA/holdout_f8.jsonl" "$DATA/vsibench_test_posed_f8.jsonl" \
-        --output "experiments/$run/results/scene_shift.json" ${LIMIT:+--limit "$LIMIT"}
+        --output "experiments/$run/results/scene_shift${SUFFIX:-}.json" ${LIMIT:+--limit "$LIMIT"}
 done
 echo "[done] $(date)"
