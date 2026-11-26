@@ -11,7 +11,8 @@
 # rebuilt from that scene). New term, weight train.scene_weight:
 #     cross-entropy of [cos(pred, answer), cos(pred in the other scene, answer)] / temperature,
 #     the real scene being the right choice
-# over the rows whose neighbour is a different scene. The other scene is a random one: it may lack the
+# over the rows whose neighbour is a different scene. For memory only the first 8 of the 32 rows per GPU
+# get the second pass (96 question-scene pairs per optimizer update). The other scene is a random one: it may lack the
 # question's objects, and for a two-way question it may have the same answer (about half the time).
 #
 # Everything else is objptr_v1_l2 (dino.txt patches as scene tokens, one placeholder per object name
@@ -39,6 +40,7 @@ slots:
 
 scene_negatives:
   enabled: true
+  rows: 8   # of the 32 rows per GPU; the second pass for all 32 runs out of memory (80 GB)
 
 fusion:
   x_encoder_type: 3drae

@@ -45,9 +45,10 @@ ground=) returns "ptr_loss" and the per-name terms, predict_embedding() leaves t
 self.pointer_metrics.
 
 With "scene_negatives: {enabled: true}" a training forward runs the predictor a second time with
-the same questions and the scene of the previous row of the batch (the scene tokens are reused, the
-encoder is not run again; placeholders are rebuilt from that scene) and returns its prediction as
-"pred_neg": the question asked in another scene. jepa3d.trainer turns it into a loss.
+the questions of its first `rows` rows (default 8; a full second pass does not fit in 80 GB) and the
+scene of the previous row of the batch (the scene tokens are reused, the encoder is not run again;
+placeholders are rebuilt from that scene) and returns its prediction as "pred_neg" (rows, D): the
+question asked in another scene. jepa3d.trainer turns it into a loss.
 
 With "answer_token: {enabled: true}" (jepa3d/answer.py) one more token follows the question: the
 end-of-text embedding plus a learned offset, with the position id after the question's last token.
@@ -63,7 +64,7 @@ Config (YAML) layout matches fusion_gv's, with
     name_target: enabled, hidden (jepa3d/names.py)
     numeric_head: enabled, hidden
     ground:  enabled, layer, hidden
-    scene_negatives: enabled
+    scene_negatives: enabled, rows
     answer_token: enabled
 """
 
@@ -110,6 +111,7 @@ class ThreeDRAEJEPA(FusionGVJEPA):
             super().__init__(config)
         self._pending = None   # (queries, slots) of the forward in progress
         self.scene_negatives = bool((scene_cfg or {}).get("enabled"))
+        self.scene_rows = (scene_cfg or {}).get("rows", 8)   # rows of the batch that get the second pass (memory)
         self._scene_tokens = None   # the encoder's tokens of the forward in progress
         self._other_scene = False   # the pass in progress shows every question the previous row's scene
         self.slot_encoder = None
@@ -436,15 +438,22 @@ class ThreeDRAEJEPA(FusionGVJEPA):
             self._pending = None
 
     def _predict_other_scene(self, images, cams, queries, slots) -> torch.Tensor:
-        """The prediction (B, D) for every question with the scene of the previous row of the batch."""
+        """The prediction (K, D) for the first K = scene_rows questions, each with the scene of the previous
+        row of the batch (row 0: the last row's)."""
+        K = min(self.scene_rows, len(queries))
         last = getattr(self.x_encoder, "last", None)
         kept = dict(last) if last is not None else None
         if last is not None:   # the placeholders read the patch features: they must be the other scene's too
-            last.update({k: last[k].roll(1, 0) for k in ("features", "valid")})
+            last.update({k: last[k].roll(1, 0)[:K] for k in ("features", "valid")})
+        if slots is not None:   # the names of the first K rows (the batch's slots are in row order)
+            mine = slots["row"] < K
+            slots = {k: (v[mine] if isinstance(v, torch.Tensor) else [x for x, m in zip(v, mine.tolist()) if m])
+                     for k, v in slots.items()}
+            slots = slots if len(slots["row"]) else None
         self._other_scene = True
-        self._begin(images, cams, queries, slots)
+        self._begin(images[:K], cams[:K], queries[:K], slots)
         try:
-            return FusionGVJEPA.predict_embedding(self, images, cams, queries)
+            return FusionGVJEPA.predict_embedding(self, images[:K], cams[:K], queries[:K])
         finally:
             self._other_scene = False
             self._ptr, self._taps = None, {}
@@ -459,7 +468,7 @@ class ThreeDRAEJEPA(FusionGVJEPA):
         frame shuffling is a no-op.
         """
         if self._other_scene:
-            tokens = self._scene_tokens.roll(1, 0)
+            tokens = self._scene_tokens.roll(1, 0)[:batch_size]
         else:
             with torch.profiler.record_function("x_encoder"):
                 tokens = self.x_encoder(images, cams)

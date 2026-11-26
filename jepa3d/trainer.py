@@ -197,12 +197,13 @@ class HardNegTrainer(GVJEPATrainer):
     def _scene_terms(self, pred, target, rows):
         """-> (loss, share of rows whose real scene is closer to the answer, rows used). Row i's other scene
         is row i - 1's; rows whose neighbour shows the same scene are left out."""
+        K = len(self._pred_neg)   # the model gives the other-scene prediction for the first K rows
         scene = [f"{row.get('subset')}/{row.get('scene')}" for row in rows]
-        use = torch.tensor([scene[i] != scene[i - 1] for i in range(len(scene))], device=pred.device)
+        use = torch.tensor([scene[i] != scene[i - 1] for i in range(K)], device=pred.device)
         if not use.any():
             return self._pred_neg.sum() * 0.0, 0.0, 0
-        target = F.normalize(target.float(), dim=-1)
-        real = (F.normalize(pred.float(), dim=-1) * target).sum(-1)[use] / self.temperature
+        target = F.normalize(target[:K].float(), dim=-1)
+        real = (F.normalize(pred[:K].float(), dim=-1) * target).sum(-1)[use] / self.temperature
         other = (F.normalize(self._pred_neg.float(), dim=-1) * target).sum(-1)[use] / self.temperature
         return F.softplus(other - real).mean(), (real > other).float().mean().item(), int(use.sum())
 
