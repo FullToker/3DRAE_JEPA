@@ -395,6 +395,20 @@ class ThreeDRAEJEPA(FusionGVJEPA):
         device = self._token_outputs.device
         return self.object_tokens.loss(self._token_outputs, slots["pos"][:, 0].to(device), slots["scale"].to(device))
 
+    def encode_target(self, targets, device):
+        """With the answer token the Y-encoder sees sentences and short answers together. Encoded in
+        groups of similar length, a short answer is not padded to the length of a sentence (the mean
+        over tokens ignores padding, so the vectors are the same); one padded batch ran out of GPU
+        memory at step ~2500 of anstok_v1."""
+        if self.answer_proj is None or len(targets) <= 64:
+            return super().encode_target(targets, device)
+        order = sorted(range(len(targets)), key=lambda i: len(targets[i]))
+        parts = [super(ThreeDRAEJEPA, self).encode_target([targets[i] for i in order[s:s + 64]], device)
+                 for s in range(0, len(order), 64)]
+        inverse = torch.empty(len(order), dtype=torch.long, device=device)
+        inverse[torch.tensor(order, device=device)] = torch.arange(len(order), device=device)
+        return torch.cat(parts)[inverse]
+
     def forward(self, images, cams, queries, targets=None, mode: str = "infonce", slots=None, ground=None):
         self._begin(images, cams, queries, slots)
         try:
